@@ -1,0 +1,17 @@
+Object,Corrected H,Reason
+2006 PD30,17.55,2002 observations seem to be spurious and not of the object in question
+2002 GR31,17.4,"Sam Deen: I'm unable to find more observations but I think the photometry is bad on the (807) and (695) data. Another object discovered adjacently in the exact same search is 2002 GS31, which was observed by (807) as having R=20.5. The full photometry on GS31 shows that it was closer to R=22.0 instead. That's not just an issue with these asteroids though - very old Kitt Peak and Mayall telescope observations from pre-2005 had a very bad habit of massively overestimating the brightness of many objects including TNOs by up to 3 magnitudes for whatever reason. Anyway, I'm unable to find it in NEAT images from 2002/03/12 down to V=21 which adds additional credence to that. Applying the same correction to the 695/807 measurements of GR31 the asteroid was closer to V=22.0 at the time."
+2023 UQ87,18.3,"Sam Deen: I think whoever measured this at M58 did a very bad job of calibrating their magnitudes, which is why it seems unusually bright. The only clear image I was able to get from DECam was i=21.8, which is about 1 full magnitude fainter than their average magnitude or about H=18.5. 
+
+     K23U87Q  C2023 10 05.35899701 39 32.643+10 04 50.56                     G96
+     K23U87Q  C2023 10 05.37024201 39 32.146+10 04 47.68                     G96
+     K23U87Q  C2023 11 04.22508801 15 20.861+07 53 30.76         21.8 i      W84
+     K23U87Q  C2023 11 05.28924801 14 38.057+07 49 29.47                     G96
+     K23U87Q  C2023 11 05.29441701 14 37.721+07 49 28.81                     G96
+     K23U87Q  C2023 11 05.29960601 14 37.624+07 49 27.80                     G96
+     K23U87Q  C2023 11 05.30476901 14 37.315+07 49 26.01                     G96"
+2024 TS82,18.53,"From Sam:
+     K24T82S  C2024 10 03.15109800 57 38.895+06 07 25.18                     W84
+     K24T82S  C2024 10 03.15725400 57 38.579+06 07 23.84                     W84
+     K24T82S  C2024 10 05.15700000 55 55.853+05 59 00.82                     W84"
+2016 DH9, 18.01, Recalculated using find_orb
