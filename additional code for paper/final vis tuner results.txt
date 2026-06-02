@@ -1,0 +1,37 @@
+==============================================================================
+Stopped early at iteration 387 of 4000.
+  Segments: 3   Accepted: 27   Rejected: 360
+  By move type (accepted / tried):
+    k=1     16 /  132
+    k=2      7 /  125
+    k=3      0 /    0
+    add      1 /    1
+    rm       0 /   47
+    swap     3 /   82
+
+  Per-segment final metrics:
+    seg  0  iters    1-  63  (  63 long)   RMSE=1.58954  Poisson=0.36015  R2=0.93137  N=2
+    seg  1  iters   64- 252  ( 189 long)   RMSE=1.59059  Poisson=0.36053  R2=0.93128  N=2
+    seg  2  iters  253- 387  ( 135 long)   RMSE=1.59276  Poisson=0.36045  R2=0.93110  N=2
+
+  Family usage at stalled local minima (2 stalled segments, 4 total slots):
+    vis_q      slots=   2 ( 50.0%)   in 2/2 segments (100.0%)
+    vis_S5     slots=   2 ( 50.0%)   in 2/2 segments (100.0%)
+    vis_typ    slots=   0 (  0.0%)   in 0/2 segments (  0.0%)
+    vis_Q      slots=   0 (  0.0%)   in 0/2 segments (  0.0%)
+    vis_flux   slots=   0 (  0.0%)   in 0/2 segments (  0.0%)
+    vis_timeavg  slots=   0 (  0.0%)   in 0/2 segments (  0.0%)
+    vis_S4     slots=   0 (  0.0%)   in 0/2 segments (  0.0%)
+
+  Current segment final state (2 features):
+    slot_0  vis_q      d = +0.7436
+    slot_1  vis_S5     d = +1.0370
+  Current segment metrics: RMSE=1.59276   Poisson=0.36045   R2=0.93110
+
+*** GLOBAL BEST across all segments (2 features) ***
+    slot_0  vis_S5     d = +0.8853
+    slot_1  vis_q      d = +0.8002
+  Global best metrics: RMSE=1.58954   Poisson=0.36015   R2=0.93137
+==============================================================================
+
+vis_S5 later became the vis_timeavg feature

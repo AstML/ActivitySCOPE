@@ -1,5 +1,15 @@
 from datetime import datetime
 
+V_BAND_CORRECTIONS = {
+    ' ': -0.8,
+    'U': -1.3, 'B': -0.8, 'g': -0.35, 'V': 0.0, 'r': 0.14,
+    'R': 0.4, 'C': 0.4, 'W': 0.4, 'i': 0.32, 'z': 0.26,
+    'I': 0.8, 'J': 1.2, 'w': -0.13, 'y': 0.32, 'L': 0.2,
+    'H': 1.4, 'K': 1.7, 'Y': 0.7, 'G': 0.28, 'v': 0.0,
+    'c': -0.05, 'o': 0.33, 'u': 2.5,
+}
+
+
 def process_astrometry(lines):
     """
     Process astronomical astrometry observations to calculate temporal metrics for each object.
@@ -25,8 +35,19 @@ def process_astrometry(lines):
         'arcs': {'day': 0, 'gap': 0, 'opp': 0},
         'lists': {'day_arcs': [], 'gap_arcs': [], 'opp_arcs': [], 'opp_gaps': []},
         'nights': {'total': 0, 'current_opp': 0, 'per_opp': []},
-        'opposition_count': 0
+        'opposition_count': 0,
+        'v_mags': []
     }
+
+    def extract_v_mag(line):
+        """Return V-band-corrected magnitude from MPC80 line, or None if unparseable."""
+        if len(line) < 71:
+            return None
+        try:
+            mag = float(line[65:70])
+        except ValueError:
+            return None
+        return mag + V_BAND_CORRECTIONS.get(line[70], 0.0)
     
     def get_top_n(lst, n=2, reverse=True):
         """Get top n elements from list, padded with zeros."""
@@ -42,7 +63,9 @@ def process_astrometry(lines):
         opp_arcs = [a for a in s['lists']['opp_arcs'] + ([s['arcs']['opp']] if s['arcs']['opp'] > 0 else []) if a > 0]
         opp_gaps = [g for g in s['lists']['opp_gaps'] if g > 0]
         all_nights = s['nights']['per_opp'] + ([s['nights']['current_opp']] if s['nights']['current_opp'] > 0 else [])
-        
+        v_mags = s['v_mags']
+        v_mags_sorted = sorted(v_mags) if v_mags else []
+
         objects[current_desig] = {
             "longest_day_arc": max(s['lists']['day_arcs'], default=0),
             "longest_gap_arc": max(s['lists']['gap_arcs'], default=0),
@@ -56,7 +79,12 @@ def process_astrometry(lines):
             "opposition_count": s['opposition_count'],
             "nights_total": s['nights']['total'],
             "opp_with_most_nights": get_top_n(all_nights)[0],
-            "opp_with_second_most_nights": get_top_n(all_nights)[1]
+            "opp_with_second_most_nights": get_top_n(all_nights)[1],
+            "v_mag_min": v_mags_sorted[0] if v_mags_sorted else None,
+            "v_mag_second_min": v_mags_sorted[1] if len(v_mags_sorted) > 1 else None,
+            "v_mag_max": v_mags_sorted[-1] if v_mags_sorted else None,
+            "v_mag_second_max": v_mags_sorted[-2] if len(v_mags_sorted) > 1 else None,
+            "v_mag_avg": sum(v_mags) / len(v_mags) if v_mags else None,
         }
     
     def reset_tracking():
@@ -66,16 +94,27 @@ def process_astrometry(lines):
             'arcs': {'day': 0, 'gap': 0, 'opp': 0},
             'lists': {'day_arcs': [], 'gap_arcs': [], 'opp_arcs': [], 'opp_gaps': []},
             'nights': {'total': 0, 'current_opp': 0, 'per_opp': []},
-            'opposition_count': 1
+            'opposition_count': 1,
+            'v_mags': []
         })
 
+    previous_id_time = ""
+
     for line in lines:
+        # these four lines filter out roving observers and satellites (the second line of each)
+        id_time = line[5:12] + line[15:32]
+        if id_time == previous_id_time:
+            continue
+        previous_id_time = id_time
+
         packed_desig = line[5:12]
         try:
             d = datetime.strptime(line[15:25], "%Y %m %d").toordinal() + float(line[25:32])
         except (ValueError, IndexError):
             continue
         
+        v_mag = extract_v_mag(line)
+
         # New object detected
         if packed_desig != current_desig:
             save_object()
@@ -83,6 +122,8 @@ def process_astrometry(lines):
             reset_tracking()
             state['times'].update({'recent': d, 'first_ever': d, 'first_opp': d, 'last_night': d})
             state['nights'].update({'total': 1, 'current_opp': 1})
+            if v_mag is not None:
+                state['v_mags'].append(v_mag)
             continue
         
         time_gap = d - state['times']['recent']
@@ -119,6 +160,9 @@ def process_astrometry(lines):
                 state['arcs']['day'] = 0
         
         state['times']['recent'] = d
-    
+
+        if v_mag is not None:
+            state['v_mags'].append(v_mag)
+
     save_object()
     return objects

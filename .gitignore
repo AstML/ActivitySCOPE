@@ -1,2 +1,8 @@
 AutogluonModels/
 *.pyc
+.cache/
+astrometry_counter/unpublished_astrometry.txt
+*.pgf
+*PVcustom*
+settings*
+.claude/

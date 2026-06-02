@@ -13,33 +13,37 @@ By predicting the expected number of oppositions any given asteroid is likely to
 ## Key Features
 
 -   **Survey Completeness Modeling:** Uses the collective history of sky surveys as an indirect sensor of activity.
--   **Machine Learning:** Employes AutoGluon to train models on the MPC asteroid orbit database.
+-   **Machine Learning:** Employs AutoGluon to train models on the MPC asteroid orbit database.
     -   **Binary Classification Model:** Predicts the probability that an object should have been observed on at least 4 oppositions. High probabilities for single-opposition objects flag potential candidates.
     -   **Regression Model:** Predicts the expected count of observed oppositions to quantify the observational deficit.
 -   **Mislinkage Detection:** Includes a secondary classifier to help filter out potential false linkages (chimera orbits) and objects with orbits too uncertain to extend easily.
-
-## Methodology
-
-The method trains on the visual absolute magnitude ($H_V$) and Keplerian orbital elements of the known inert asteroid population. Key features include:
--   **Basic Orbital Elements:** Inclination ($i$), Longitude of Ascending Node ($\Omega$), etc.
--   **Engineered Features:**
-    -   `vis_0.6`: A proxy for typical apparent magnitude over time.
-    -   `visq_-0.1`: A proxy for peak brightness at perihelion.
-    -   `orbital_period_sync`: Measures resonance with Earth's orbital period.
 
 ## Installation
 
 ### Prerequisites
 
-*   Python 3.8+
-*   Jupyter Notebook
+*   Python 3.11 is guaranteed to work (but 3.9 - 3.11 are likely all workable)
+*   Jupyter Notebook or compatible
 
 ### Dependencies
 
-Install the required Python packages. Key dependencies include `autogluon`, `pandas`, `numpy`, `xgboost`, `scipy`, and `matplotlib`.
+Install the required Python packages using the provided `requirements.txt`. It is recommended to create a dedicated environment first:
 
-```bash
-pip install autogluon pandas numpy xgboost scipy matplotlib
+**Using conda:**
+```
+conda create -n activityscope python=3.11
+conda activate activityscope
+```
+
+**Or using venv:**
+```
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+Then install dependencies:
+```
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 *Note: AutoGluon has its own specific installation requirements depending on your OS and hardware (CPU/GPU). Please refer to the [AutoGluon Installation Guide](https://auto.gluon.ai/stable/install.html).*
@@ -60,8 +64,8 @@ The current implementation is provided in the Jupyter Notebook: `ActivitySCOPE_s
 
 ActivitySCOPE has successfully identified numerous active objects, including:
 
-*   **Confirmed Comets/Active Asteroids:** P/2023 JN16, 2008 BJ22, 2025 VZ8, 489P/Denning.
-*   **Highly Likely Candidates:** 2001 BV70, 2010 RH69.
+*   **Confirmed Comets/Active Asteroids:** P/2023 JN16, 2008 BJ22, 2025 VZ8, 489P/Denning, 2010 RH69.
+*   **Highly Likely Candidates:** 2001 BV70.
 
 ### Interpreting Results
 The model outputs a probability $P(N_{\text{opp}} \ge 4)$.

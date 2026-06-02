@@ -27,3 +27,33 @@ Object,Corrected H,Reason
 2014 EP95, 17.5, bad W84 photometry for 2014
 2014 EK69, 15.9, suspect bad W84 photometry
 2014 EM120, 16.3, suspect bad W84 photometry
+2001 FV218, 18.17, Recalculated using find_orb
+2023 RR50, 18.3, bad photometry M58
+2023 RD54, 18.75, potentially bad photometry M58
+2014 JU141, 18.3, Recalculated using find_orb
+2009 DP2, 14.17, This value prior to its 2026 recovery which lowered the average
+2023 UP85, 18.5, Suspect M58 photometry
+2021 CH71, 18.05, Suspect W76 photometry
+2023 HE39, 18.0, Recalculated using find_orb
+2006 VT188, 16.7, Uncertain photometry
+2014 EM97, 16.4, bad W84 photometry for 2014
+2015 HT387, 15.8, bad W84 photometry for 2014
+2014 EF248, 16.2, bad W84 photometry for 2014
+2015 KE428, 18.1, bad W84 photometry for 2014
+2012 TV407, 17.82, Recalculated using find_orb
+2014 QH387, 18.1, possible mislinkage and other tracklets found that may fit better
+2013 PM21, 17.9, prefer F51 photometry slightly
+2014 SG99, 17.65, find_orb with addl astrometry
+2012 TN228, 17.5, find_orb recalc
+2013 TK16, 16.9, find_orb recalc with addl astrometry
+2023 VH36, 17.9, find_orb recalc
+2026 AZ21, 19.2, find_orb recalc
+2011 CL12, 18.3, find_orb recalc
+2014 ES157, 16.5, presume bad W84 photometry for 2014
+2024 AZ1, 17.6, find_orb recalc
+2015 KQ401, 17.2, bad W84 photometry for 2014
+2020 BY182, 18.7, bad photometry for W16?
+2025 NU212, 16.9, conservative recalc with find_orb monte carlo
+2023 UN22, 18.6, bad photometry for M58?
+2017 UQ204, 18.1, find_orb recalc
+2022 GF6, 18.1, find_orb recalc prioritizing F51 photometry
