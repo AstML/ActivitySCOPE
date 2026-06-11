@@ -42,11 +42,11 @@ from scipy.stats import poisson
 
 # --- data columns the table reads from the combined DataFrame ----------------
 # Each entry: (DataFrame column, format function).  Order matches the table.
-DATA_COLUMNS = ["a", "e", "i", "H", "TJ", "Num_opps", "exp_Num_opps", "prob", "DeltaQ", "S_EV"]
+DATA_COLUMNS = ["q", "a", "e", "i", "TJ", "H", "Num_opps", "exp_Num_opps", "prob", "DeltaQ", "S_EV"]
 
-# Subscript the cycle number of a provisional designation: "2010 RH69" -> "2010 RH$_{69}$".
-# Matches a 4-digit year, a space, two capital letters, then the trailing digits.
-_SUBSCRIPT_RE = re.compile(r"(\b\d{4}\s[A-Z]{2})(\d+)")
+# Subscript the cycle number of a provisional designation: "2010 RH69" -> "2010~RH$_{69}$".
+# Matches a 4-digit year, a space or tilde, two capital letters, then optional trailing digits.
+_SUBSCRIPT_RE = re.compile(r"(\b\d{4})[ ~]([A-Z]{2})(\d*)")
 
 # Leading periodic-comet number prefix, e.g. "282P/" in "282P/(323137) 2003 BM80".
 _COMET_PREFIX_RE = re.compile(r"^\d+[PDAI]/")
@@ -54,7 +54,11 @@ _COMET_PREFIX_RE = re.compile(r"^\d+[PDAI]/")
 
 def format_designation(name, confirmed=False):
     """Plain designation -> LaTeX object cell content (subscripts + optional asterisk)."""
-    formatted = _SUBSCRIPT_RE.sub(r"\1$_{\2}$", name)
+    def _repl(m):
+        base = f"{m.group(1)}~{m.group(2)}"
+        return f"{base}$_{{{m.group(3)}}}$" if m.group(3) else base
+
+    formatted = _SUBSCRIPT_RE.sub(_repl, name)
     if confirmed:
         formatted += r"$^{\ast}$"
     return formatted
@@ -89,6 +93,7 @@ def _sci_latex(v):
 
 # DataFrame column -> formatter.  Tweak here to change precision.
 FORMATTERS = {
+    "q": _fixed(2),
     "a": _fixed(2),
     "e": _fixed(3),
     "i": _fixed(2),
@@ -98,7 +103,7 @@ FORMATTERS = {
     "exp_Num_opps": _fixed(1),
     "prob": _fixed(6),
     "DeltaQ": _fixed(1),
-    "S_EV": _sci_latex,
+    "S_EV": _fixed(5),
 }
 
 
@@ -109,7 +114,7 @@ def combine_sources(for_paper, cometmerge):
     Returns a DataFrame with an ``Object`` column plus all columns needed by the
     table.  ``DeltaQ`` and ``S_EV`` are computed if absent.
     """
-    base_cols = ["Object", "a", "e", "i", "H", "TJ", "Num_opps", "exp_Num_opps", "prob",
+    base_cols = ["Object", "q", "a", "e", "i", "H", "TJ", "Num_opps", "exp_Num_opps", "prob",
                  "quantile_Opps", "DeltaQ", "poisson_cdf"]
 
     a = for_paper.copy()
@@ -126,6 +131,11 @@ def combine_sources(for_paper, cometmerge):
 
 def _ensure_derived(df):
     df = df.copy()
+    if "q" not in df.columns:
+        if {"a", "e"}.issubset(df.columns):
+            df["q"] = df["a"] * (1 - df["e"])
+        else:
+            df["q"] = np.nan
     if "DeltaQ" not in df.columns:
         if "quantile_Opps" in df.columns and "Num_opps" in df.columns:
             df["DeltaQ"] = df["quantile_Opps"] - df["Num_opps"]
@@ -169,41 +179,41 @@ def _lookup(df_by_object, designation):
 # --- LaTeX templates (verbatim from main.tex) --------------------------------
 _HEADER = r"""\begin{longrotatetable}
 
-\begin{longtable}{lrrrrrrrrrrl}
-\caption{\activityscope\ candidates, recoveries, and false positives. Confirmed active objects are marked with an asterisk ($^{\ast}$).}
+\begin{longtable}{lrrrrrrrrrrrl}
+\caption{\activityscope\ candidates, recoveries, and false positives. Confirmed active objects are marked with an asterisk.}
 \label{tab:activityscope_results}\\
 \toprule
-Object & $a$ & $e$ & $i~(^\circ)$ &
-$H_V$\tabnote{Absolute magnitude in the $V$ band, assuming an inert object.} &
+Object & $q$ {\footnotesize (AU)} & $a$ {\footnotesize (AU)} & $e$ & $i~(^\circ)$ &
 $T_J$\tabnote{Tisserand parameter with respect to Jupiter.} &
+$H_V$\tabnote{Absolute magnitude in the $V$ band, assuming an inert object.} &
 $N_{\rm opp}$\tabnote{Number of oppositions on which the object has been observed.} &
-$E[N_{\rm opp}]$\tabnote{Expected number of observed oppositions for an inert object of the same orbit and $H_V$, predicted by the regression model.} &
-$P(N_{\rm opp}\ge4)$\tabnote{Binary-classifier probability that an inert object of the same orbit and $H_V$ would be observed on at least four oppositions.} &
+{\footnotesize $E[N_{\rm opp}]$}\tabnote{Expected number of observed oppositions for an inert object of the same orbit and $H_V$, predicted by the regression model.} &
+{\footnotesize $P(N_{\rm opp}\ge4)$}\tabnote{Binary-classifier probability that an inert object of the same orbit and $H_V$ would be observed on at least four oppositions.} &
 $\Delta Q$\tabnote{Quantile deficit $\Delta Q = Q_{0.006} - N_{\rm opp}$, where $Q_{0.006}$ is the model's $0.006$-quantile prediction of the opposition count. Larger positive values indicate a larger deficit.} &
 $S_{\rm EV}$\tabnote{Poisson lower-tail anomaly score $S_{\rm EV}=F_{\rm Pois}(N_{\rm opp}-1;\,E[N_{\rm opp}]-1)$. Smaller values indicate a larger deficit relative to $E[N_{\rm opp}]$.} &
 Note \\
 \midrule
 \endfirsthead
 
-\caption[]{\activityscope\ candidates, recoveries, and false positives (continued).}\\
+\caption[]{\activityscope\ candidates, recoveries, and false positives. Confirmed active objects are marked with an asterisk. (continued)}\\
 \toprule
-Object & $a$ & $e$ & $i~(^\circ)$ &
-$H_V$\textsuperscript{a} & $T_J$\textsuperscript{b} & $N_{\rm opp}$\textsuperscript{c} &
-$E[N_{\rm opp}]$\textsuperscript{d} & $P(N_{\rm opp}\ge4)$\textsuperscript{e} &
+Object & $q$ {\footnotesize (AU)} & $a$ {\footnotesize (AU)} & $e$ & $i~(^\circ)$ &
+$T_J$\textsuperscript{a} & $H_V$\textsuperscript{b} & $N_{\rm opp}$\textsuperscript{c} &
+{\footnotesize $E[N_{\rm opp}]$}\textsuperscript{d} & {\footnotesize $P(N_{\rm opp}\ge4)$}\textsuperscript{e} &
 $\Delta Q$\textsuperscript{f} & $S_{\rm EV}$\textsuperscript{g} & Note \\
 \midrule
 \endhead
 
 \midrule
-\multicolumn{12}{r}{Continued on next page}\\
+\multicolumn{13}{r}{Continued on next page}\\
 \endfoot
 
 \endlastfoot
 """
 
 _FOOTER = r"""\bottomrule
-\multicolumn{12}{l}{\footnotesize $^{\ast}$\,Confirmed active object.}\\
-\multicolumn{12}{l}{\footnotesize $^{\dagger}$\,Single-opposition at the time of flagging; tabulated $N_{\rm opp}$, $\Delta Q$, and $S_{\rm EV}$ are the values the model assigns to an otherwise-identical single-opposition object.}\\
+\multicolumn{13}{l}{\footnotesize $^{\ast}$\,Confirmed active object.}\\
+\multicolumn{13}{l}{\footnotesize $^{\dagger}$\,Single-opposition at the time of flagging; tabulated $N_{\rm opp}$, $\Delta Q$, and $S_{\rm EV}$ are the values the model assigns to an otherwise-identical single-opposition object.}\\
 \printtabnotes
 
 \end{longtable}
@@ -215,8 +225,8 @@ SECTION_MULTI_COMET = "Cometary orbits (multiple oppositions when flagged)"
 SECTION_SINGLE_COMET = "Cometary orbits (single opposition when flagged)"
 SECTION_ASTEROID = "Asteroidal orbits"
 
-_SORT_SEV_ASC = r"sorted by $S_{\rm EV}$, ascending"
-_SORT_PROB_DESC = r"sorted by $P(N_{\rm opp}\ge4)$, descending"
+_SORT_SEV_ASC = r"sorted by $S_{\rm EV}$, ascending, in bold"
+_SORT_PROB_DESC = r"sorted by $P(N_{\rm opp}\ge4)$, descending, in bold"
 
 
 _DAGGER = r"$^{\dagger}$"
@@ -263,12 +273,18 @@ def _key_desc(v):
     return (na, -v if not na else 0.0)
 
 
-def _render_row(designation, confirmed, note, data, dagger=False):
+def _render_row(designation, confirmed, note, data, dagger=False, sort_col=None):
     obj = format_designation(designation, confirmed)
     if data is None:
         cells = ["" for _ in DATA_COLUMNS]
     else:
-        cells = [FORMATTERS[col](data.get(col)) for col in DATA_COLUMNS]
+        cells = []
+        for col in DATA_COLUMNS:
+            val = FORMATTERS[col](data.get(col))
+            if col == sort_col and val.strip():
+                val = f"\\textbf{{{val}}}"
+            cells.append(val)
+            
     if dagger:
         nopp_idx = DATA_COLUMNS.index("Num_opps")
         cells[nopp_idx] = (cells[nopp_idx] or "") + _DAGGER
@@ -323,26 +339,26 @@ def build_table(df, notes_csv, warn=True, multi_opp_threshold=1):
     single.sort(key=lambda e: _key_desc(_num(e[1], "prob")))
     asteroid.sort(key=lambda e: _key_desc(_num(e[1], "prob")))
 
-    # (label, entries, sort caption, force a page break before this section)
+    # (label, entries, sort caption, force a page break before this section, sort column)
     sections = [
-        (SECTION_MULTI_COMET, multi, _SORT_SEV_ASC, False),
-        (SECTION_SINGLE_COMET, single, _SORT_PROB_DESC, False),
-        (SECTION_ASTEROID, asteroid, _SORT_PROB_DESC, True),  # hard-coded page break
+        (SECTION_MULTI_COMET, multi, _SORT_SEV_ASC, False, "S_EV"),
+        (SECTION_SINGLE_COMET, single, _SORT_PROB_DESC, False, "prob"),
+        (SECTION_ASTEROID, asteroid, _SORT_PROB_DESC, True, "prob"),  # hard-coded page break
     ]
 
     parts = [_HEADER]
-    for label, entries, sortcap, newpage in sections:
+    for label, entries, sortcap, newpage, sort_col in sections:
         if not entries:
             continue
         if newpage:
             parts.append(r"\newpage")
         heading = f"\\textbf{{{label}}} \\textnormal{{\\footnotesize ({sortcap})}}"
-        parts.append(f"\\multicolumn{{12}}{{l}}{{{heading}}}\\\\")
+        parts.append(f"\\multicolumn{{13}}{{l}}{{{heading}}}\\\\")
         parts.append(r"\midrule")
         parts.append("")
         for r, data in entries:
             parts.append(_render_row(r["designation"], r["confirmed"], r["note"], data,
-                                     dagger=r["nopp_dagger"]))
+                                     dagger=r["nopp_dagger"], sort_col=sort_col))
             parts.append("")
         parts.append(r"\midrule")
 

@@ -1,9 +1,5 @@
 autogluon.tabular[all]
 sbpy
-scipy
-scikit-learn
-xgboost
 matplotlib
-numpy
-pandas
 statsmodels
+shap

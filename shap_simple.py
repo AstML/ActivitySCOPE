@@ -1,4 +1,4 @@
-"""SHAP scatter / mean-effect plots for the simplified paper model (H, i, Node, vis_orbit_mag_multi).
+"""SHAP scatter / mean-effect plots for the simplified paper model (vis_orbit_mag_multi, spatial_discoverability_fraction, Node).
 
 Uses AutoGluon's TabularPredictor (Poisson regression, good_quality bagged ensemble)
 for maximum accuracy, mirroring the main pipeline in ActivitySCOPE_simplified_demo.ipynb.
@@ -18,25 +18,29 @@ from autogluon.tabular import TabularPredictor
 import activityscope_utils as utils
 
 
-SIMPLE_FEATURES = ["H", "i", "Node", "vis_orbit_mag_multi"]
+SIMPLE_FEATURES = ["vis_orbit_mag_multi", "spatial_discoverability_fraction", "Node"]
 LABEL_COL = "Num_opps_minus_one"
 
 FEATURE_LABELS_LATEX = {
-    "H": r"$H_V$",
-    "i": r"$i$",
-    "Node": r"$\Omega$",
     "vis_orbit_mag_multi": r"vis\_orbit\_mag\_multi",
+    "spatial_discoverability_fraction": r"spatial\_discoverability\_fraction",
+    "Node": r"$\Omega$",
 }
 
 FEATURE_LABELS_PLAIN = {
-    "H": r"$H_V$",
-    "i": r"$i$",
-    "Node": r"$\Omega$",
     "vis_orbit_mag_multi": "vis_orbit_mag_multi",
+    "spatial_discoverability_fraction": "spatial_discoverability_fraction",
+    "Node": r"$\Omega$",
 }
 
 FEATURE_XLIMS = {
-    "i": (0, 75),
+    "vis_orbit_mag_multi": (17, 30.5),
+    "Node": (0, 360),
+}
+
+FEATURE_XTICKS = {
+    "vis_orbit_mag_multi": [20, 25, 30],
+    "Node": [0, 90, 180, 270, 360],
 }
 
 
@@ -103,37 +107,54 @@ def compute_shap(predictor, orb_test, features=SIMPLE_FEATURES,
     return X_sampled, explanation.values
 
 
-def _plot_one(x_data, y_data, label, sample_n=200000, xlim=None):
-    if len(x_data) > sample_n:
-        idx = np.random.choice(len(x_data), sample_n, replace=False)
-        x_data = x_data[idx]
-        y_data = y_data[idx]
+def _plot_panel(X_test, shap_values, features, labels_map, sample_n=200000):
+    """Render all features as a single 1xN panel with a shared y-axis.
 
-    fig, ax = plt.subplots(figsize=(4.5, 3.5))
-    ax.scatter(x_data, y_data, color="#1f77b4", s=10, alpha=0.5,
-               rasterized=True, edgecolors='none')
-    ax.set_ylim(-10, 10)
-    ax.set_yticks(np.arange(-10, 11, 2))
-    if xlim is not None:
-        ax.set_xlim(*xlim)
-    ax.set_xlabel(f"Feature Value: {label}")
-    ax.set_ylabel(r"SHAP Value")
-    ax.grid(True, linestyle=":", alpha=0.6)
-    ax.axhline(0, color="black", linewidth=0.8)
+    Sized for ~6.5in of usable width (8.5in paper with 1in margins) and a
+    common SHAP-value axis spanning -10 to +15.
+    """
+    n = len(features)
+    fig, axes = plt.subplots(1, n, figsize=(7.0, 2.7), sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    usetex = matplotlib.rcParams.get("text.usetex", False)
+    for j, feature in enumerate(features):
+        ax = axes[j]
+        tag = f"({chr(ord('a') + j)})"
+        tag = rf"\textbf{{{tag}}}" if usetex else tag
+        ax.text(0.04, 0.96, tag, transform=ax.transAxes,
+                ha="left", va="top", fontweight="bold")
+        x_data = X_test[feature].values
+        y_data = shap_values[:, j]
+        if len(x_data) > sample_n:
+            sel = np.random.choice(len(x_data), sample_n, replace=False)
+            x_data = x_data[sel]
+            y_data = y_data[sel]
+
+        ax.scatter(x_data, y_data, color="#1f77b4", s=10, alpha=0.5,
+                   rasterized=True, edgecolors='none')
+        ax.set_ylim(-10, 15)
+        ax.set_yticks(np.arange(-10, 16, 5))
+        xlim = FEATURE_XLIMS.get(feature)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        xticks = FEATURE_XTICKS.get(feature)
+        if xticks is not None:
+            ax.set_xticks(xticks)
+        ax.set_xlabel(labels_map.get(feature, feature))
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.axhline(0, color="black", linewidth=0.8)
+
+    axes[0].set_ylabel(r"SHAP Value")
     fig.tight_layout()
-    return fig, ax
+    return fig, axes
 
 
 def plot_shap_display(X_test, shap_values, features=SIMPLE_FEATURES):
-    figs = {}
-    for feature in features:
-        idx = features.index(feature)
-        label = FEATURE_LABELS_PLAIN.get(feature, feature)
-        fig, _ = _plot_one(X_test[feature].values, shap_values[:, idx], label,
-                           xlim=FEATURE_XLIMS.get(feature))
-        figs[feature] = fig
-        plt.show()
-    return figs
+    fig, _ = _plot_panel(X_test, shap_values, features, FEATURE_LABELS_PLAIN)
+    plt.show()
+    return fig
 
 
 def save_shap_pgf(X_test, shap_values, out_dir, features=SIMPLE_FEATURES, prefix="shap_simple"):
@@ -145,18 +166,12 @@ def save_shap_pgf(X_test, shap_values, out_dir, features=SIMPLE_FEATURES, prefix
         "pgf.rcfonts": False,
         "font.size": 11,
     }
-    saved = []
     with matplotlib.rc_context(pgf_rc):
-        for feature in features:
-            idx = features.index(feature)
-            label = FEATURE_LABELS_LATEX.get(feature, feature)
-            fig, _ = _plot_one(X_test[feature].values, shap_values[:, idx], label,
-                               xlim=FEATURE_XLIMS.get(feature))
-            out = os.path.join(out_dir, f"{prefix}_{feature}.pgf")
-            fig.savefig(out, backend="pgf")
-            plt.close(fig)
-            saved.append(out)
-    return saved
+        fig, _ = _plot_panel(X_test, shap_values, features, FEATURE_LABELS_LATEX)
+        out = os.path.join(out_dir, f"{prefix}_panel.pgf")
+        fig.savefig(out, backend="pgf")
+        plt.close(fig)
+    return [out]
 
 
 def run(orb_training, orb_test, features=SIMPLE_FEATURES, out_dir=None,

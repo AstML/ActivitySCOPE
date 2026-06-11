@@ -46,7 +46,20 @@ from sklearn.metrics import mean_poisson_deviance, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from xgboost import XGBRegressor
 
-import activityscope_utils as utils
+# This tuner lives in modeling/parameter tuners/ but imports the repo-root
+# activityscope_utils module and reads data files (CSVs, JSON, the MPCORB
+# cache) by repo-root-relative paths. Put the repo root on sys.path and make
+# it the working directory so both resolve regardless of the launch directory.
+import os
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+os.chdir(_REPO_ROOT)
+
+import activityscope_utils as utils  # noqa: E402  (after sys.path bootstrap)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +191,9 @@ def prepare_training_data(subsample=None, seed=0):
     """Load orb, feature-engineer, then apply the same training filter the
     notebook uses (cells 1, 3, 5, and 7 of ActivitySCOPE_simplified_demo.ipynb)."""
     print("Loading orbit databases (this can take a minute)...")
-    orb = utils.load_all_databases(apply_filters=True)
+    orb = utils.load_all_databases()
+    # filter out objects marked in either of the two named filter csvs
+    orb = orb[~orb["filtered_out"].astype(bool)]
     orb = utils.feature_engineering(orb)
 
     # Cell 5: merge cached extension_difficulty scores so the training filter

@@ -25,6 +25,27 @@ from xgboost import XGBClassifier
 
 
 # ==============================================================================
+# IAU H-G PHASE FUNCTION (G = 0.15)
+# ==============================================================================
+# Shared helper for the phase-angle dimming term, -2.5*log10(Phi(alpha)), used
+# by vis_inc; the same blended HG phase function is also inlined in the
+# orbit-averaged feature loops. Returns the blended phase factor Phi(alpha) in
+# [0, 1]; alpha is the phase angle in radians.
+_HG_A1, _HG_B1 = 3.33, 0.63
+_HG_A2, _HG_B2 = 1.87, 1.22
+_HG_G = 0.15
+_PHI_FLOOR = 1e-30
+
+
+def hg_phase(alpha_rad):
+    """Blended IAU H-G phase function Phi(alpha) for G = 0.15."""
+    tan_half = np.maximum(np.tan(np.clip(alpha_rad, 0.0, np.pi) / 2.0), 0.0)
+    phi1 = np.exp(-_HG_A1 * np.power(tan_half, _HG_B1))
+    phi2 = np.exp(-_HG_A2 * np.power(tan_half, _HG_B2))
+    return np.maximum((1.0 - _HG_G) * phi1 + _HG_G * phi2, _PHI_FLOOR)
+
+
+# ==============================================================================
 # MPC ORBIT DOWNLOAD CACHE
 # ==============================================================================
 
@@ -67,6 +88,16 @@ def get_mpcorb_extended_path(max_age_seconds=_MPCORB_CACHE_TTL_SECONDS):
 # MODEL HYPERPARAMETERS AND SCORING
 # ==============================================================================
 
+from autogluon.tabular.configs.hyperparameter_configs import get_hyperparameter_config
+import copy
+
+def _get_hyperparameters_excluding_catboost():
+    """Fetches the default AutoGluon hyperparameters and removes CatBoost."""
+    hp = copy.deepcopy(get_hyperparameter_config('default'))
+    if 'CAT' in hp:
+        del hp['CAT']
+    return hp
+
 # Hyperparameters for binary classification models
 HYPERPARAMETERS_BINARY = {
     "GBM": [
@@ -86,8 +117,10 @@ HYPERPARAMETERS_BINARY = {
 HYPERPARAMETERS_POISSON = {
     'GBM': {'objective': 'poisson', 'num_iterations': 1000, 'learning_rate': 0.1},
     'XGB': {'objective': 'count:poisson'},
-    'CAT': {'objective': 'Poisson'}
 }
+
+# Hyperparameters for Quantile regression models
+HYPERPARAMETERS_QUANTILE = _get_hyperparameters_excluding_catboost()
 
 # Custom Poisson scorer for regression model evaluation
 POISSON_SCORER = make_scorer(
@@ -102,14 +135,9 @@ POISSON_SCORER = make_scorer(
 # ORBITAL DATABASE LOADING
 # ==============================================================================
 
-def load_mpc_orbits(apply_filters=True):
+def load_mpc_orbits():
     """
     Load the MPC orbit database and apply initial processing.
-    
-    Parameters
-    ----------
-    apply_filters : bool, optional
-        Whether to apply filter lists (default: True)
     
     Returns
     -------
@@ -118,26 +146,24 @@ def load_mpc_orbits(apply_filters=True):
     """
     orb = pd.read_json(get_mpcorb_extended_path(), compression='gzip')
 
-    # MPC leaves the U parameter blank for some older objects.
-    # Any recent object should have a U, but some older ones without a well defined orbit 
-    # are deemed lost and have a blank H.
-    # For our purposes we fill it with 10 here, even though some objects with missing U 
-    # actually have a much better defined orbit than U=9.
+    # MPC leaves the U (orbit-uncertainty) parameter blank for some older objects
+    # deemed lost. We fill it with 10 (worse than the U=9 maximum), even though a
+    # few objects with a missing U actually have a better-defined orbit than U=9.
     orb['U'] = pd.to_numeric(orb['U'], errors='coerce').fillna(10)
     
     orb = orb.convert_dtypes()
     orb.drop(["Other_desigs"], axis=1, inplace=True)
     
-    if apply_filters:
-        # Filter based on filter lists
-        filter_until_further_notice = pd.read_csv("filter until further notice.csv")
-        filter_out_unless_updated = pd.read_csv("filter out unless updated.csv")
-        
-        orb = orb[~orb["Principal_desig"].isin(filter_until_further_notice["Object"])]
-        
-        for _, row in filter_out_unless_updated.iterrows():
-            orb = orb[~((orb["Principal_desig"] == row["Object"]) & 
-                       (orb["Arc_length"] == row["Arc_length"]))]
+    # Filter based on filter lists
+    filter_until_further_notice = pd.read_csv("filter until further notice.csv")
+    filter_out_unless_updated = pd.read_csv("filter out unless updated.csv")
+    
+    # We will create a column that marks it as filtered_out
+    orb["filtered_out"] = orb["Principal_desig"].isin(filter_until_further_notice["Object"]).astype(int)
+    
+    for _, row in filter_out_unless_updated.iterrows():
+        mask = (orb["Principal_desig"] == row["Object"]) & (orb["Arc_length"] == row["Arc_length"])
+        orb.loc[mask, "filtered_out"] = 1
     
     return orb
 
@@ -511,7 +537,7 @@ def feature_engineering(orb):
     #       derived.
     d_timeavg = 0.9
     r_timeavg = a * (1.0 + e**2 / 2.0)
-    delta_geom = np.sqrt(np.maximum(r_timeavg**2 - 1.0, eps_val))
+    delta_geom = np.sqrt(np.maximum(np.abs(r_timeavg**2 - 1.0), eps_val))
     delta_timeavg = np.maximum(delta_geom - d_timeavg, eps_val)
     orb['vis_timeavg'] = (5.0 * np.log10(np.maximum(r_timeavg, eps_val) * delta_timeavg) + H).astype(float)
 
@@ -527,17 +553,80 @@ def feature_engineering(orb):
     delta_flux = np.maximum(r_flux - d_flux, eps_val)
     orb['vis_flux'] = (5.0 * np.log10(np.maximum(r_flux, eps_val) * delta_flux) + H).astype(float)
 
+    # ------------------------------------------------------------------------
+    # Simpler-math alternatives to vis_flux. Both keep the identical
+    # V = 5*log10(r * Delta) + H template and only change the characteristic
+    # heliocentric distance r(a, e). Each r is below the semi-major axis a and
+    # decreases with e (bright-biased toward close passages), reproducing the
+    # qualitative behavior of vis_flux = a*(1 - e^2)^0.25 = sqrt(a*b), but with
+    # an elementary, one-line derivation instead of the Keplerian <1/r^2>_t
+    # time-average that fixes vis_flux's quarter-power exponent.
+    #
+    # Delta = r - d uses d = 1 (Earth at 1 AU, opposition geometry) for both,
+    # matching vis_flux and introducing no fitted parameter; d can be refit per
+    # feature like the siblings (vis_timeavg=0.9, vis_typ=0.51, vis_q=0.8) if
+    # desired.
+    d_alt = 1.0
+
+    # vis_smin: r = a*sqrt(1 - e^2) = b, the orbit's semi-minor axis, which is
+    # exactly the geometric mean of perihelion and aphelion, sqrt(q*Q) =
+    # sqrt(a(1-e) * a(1+e)). One line, a textbook orbital quantity, no integral.
+    # Same (1 - e^2)^p form as vis_flux with p = 1/2 instead of 1/4, so it bends
+    # the same way but a bit harder (brighter) at high e.
+    r_smin = a * np.sqrt(np.maximum(1.0 - e**2, 0.0))
+    delta_smin = np.maximum(r_smin - d_alt, eps_val)
+    orb['vis_smin'] = (5.0 * np.log10(np.maximum(r_smin, eps_val) * delta_smin) + H).astype(float)
+
+    # vis_mid: r = (q + a)/2 = a*(1 - e/2), the midpoint between perihelion and
+    # the semi-major (mean) distance -- "halfway between closest approach and
+    # average distance." Linear in e (a different functional shape from the
+    # (1-e^2) family above), trivially defensible. It sits below a (bright-
+    # biased), the mirror of a*(1 + e/2), so it carries oppositely-signed e
+    # information relative to the aphelion-side distances.
+    r_mid = a * (1.0 - e / 2.0)
+    delta_mid = np.maximum(r_mid - d_alt, eps_val)
+    orb['vis_mid'] = (5.0 * np.log10(np.maximum(r_mid, eps_val) * delta_mid) + H).astype(float)
+    # ------------------------------------------------------------------------
+
     # vis_q
     d_vis_q = 0.8
     r_vis_q = a * (1.0 - e)
     delta_vis_q = np.maximum(r_vis_q - d_vis_q, eps_val)
     orb['vis_q'] = (5.0 * np.log10(np.maximum(r_vis_q, eps_val) * delta_vis_q) + H).astype(float)
-    
-    # vis_inc
+
+    # vis_inc_old
     r_t = a * (1.0 + e**2 / 2.0)
     i_rad_temp = np.radians(orb['i'])
     delta_inc = np.sqrt(np.maximum(r_t**2 - 2.0 * r_t * np.cos(i_rad_temp) + 1.0, eps_val))
-    orb['vis_inc'] = (5.0 * np.log10(np.maximum(r_t, eps_val) * delta_inc) + H).astype(float)
+    orb['vis_inc_old'] = (5.0 * np.log10(np.maximum(r_t, eps_val) * delta_inc) + H).astype(float)
+
+    # vis_inc: vis_inc_old plus a single HG phase-angle dimming term.
+    # The paper calls vis_inc_old "a useful-to-the-model approximation, not a physical
+    # point in time" -- and unlike vis_opp_mean / vis_orbit_mag_multi it carries no
+    # phase correction. The geometry it already defines (asteroid at r_t, Earth at
+    # 1 AU, geocentric distance delta_inc) fixes the Sun-asteroid-Earth phase angle
+    # by the law of cosines at the asteroid vertex:
+    #   cos alpha = (r^2 + Delta^2 - 1) / (2 r Delta) = (r - cos i) / Delta.
+    # Adding -2.5*log10(Phi(alpha)) makes it more physical with no new parameter.
+    cos_alpha_inc = np.clip(
+        (r_t - np.cos(i_rad_temp)) / np.maximum(delta_inc, eps_val), -1.0, 1.0
+    )
+    alpha_inc = np.arccos(cos_alpha_inc)
+    orb['vis_inc'] = (
+        5.0 * np.log10(np.maximum(r_t, eps_val) * delta_inc)
+        + H - 2.5 * np.log10(hg_phase(alpha_inc))
+    ).astype(float)
+
+    # inc_opp_penalty: vis_inc's inclination insight, stripped of H and the
+    # absolute magnitude scale so it is orthogonal to the vis* family. It is the
+    # dimming (mag, >= 0) that inclination alone costs an object at opposition,
+    # relative to a coplanar (i = 0) twin: the extra geocentric distance
+    # (delta_inc vs delta0 = sqrt(r_t^2 - 1)) plus the phase-angle floor that the
+    # out-of-ecliptic offset forces. ~0 for ecliptic asteroids, growing with i.
+    delta0 = np.sqrt(np.maximum(r_t**2 - 1.0, eps_val))
+    orb['inc_opp_penalty'] = (
+        5.0 * np.log10(delta_inc / delta0) - 2.5 * np.log10(hg_phase(alpha_inc))
+    ).astype(float)
     
     # ============================================================================
     # ORBITAL DYNAMICS FEATURES
@@ -545,6 +634,7 @@ def feature_engineering(orb):
     
     # Orbital period resonance with Earth
     # Measures how closely the orbital period matches an integer number of years
+    # Period is already measured in years (where we get it from)
     orb['orbital_period_sync'] = np.abs(
         orb['Orbital_period'] - np.round(orb['Orbital_period'])
     )
@@ -635,8 +725,22 @@ def feature_engineering(orb):
     elong_thresh_rad = np.radians(60.0)
 
     # spatial_discoverability_fraction thresholds and HG phase-function constants
-    V_LIM = 22.5
-    LAT_LIM_RAD = np.radians(25.0)
+    # Brightness observability roll-off (replaces the old hard V <= 22.5 cut).
+    # Detection efficiency tapers as objects approach the survey depth rather
+    # than vanishing at one magnitude. A linear ramp (tuned via
+    # modeling/parameter tuners/tune_v_lim.py) gives full weight at/brighter than
+    # V_ROLLOFF_FULL and zero at/fainter than V_ROLLOFF_ZERO, i.e. weight 1 at
+    # V=21.133 falling linearly to 0 at V=22.866 (width 1.733 mag).
+    V_ROLLOFF_FULL = 21.1
+    V_ROLLOFF_ZERO = 22.9
+    # Geocentric-ecliptic-latitude observability roll-off (replaces the old hard
+    # |beta| <= 25 deg cutoff). Survey coverage does not vanish abruptly at one
+    # latitude; it tapers. A symmetric linear ramp (tuned via
+    # modeling/parameter tuners/tune_lat_lim_rolloff.py) gives full weight at/below
+    # LAT_ROLLOFF_FULL_DEG and zero at/above LAT_ROLLOFF_ZERO_DEG, i.e. weight 1 at
+    # 2 deg falling linearly to 0 at 32 deg (0.5 at the 17 deg midpoint).
+    LAT_ROLLOFF_FULL_DEG = 2.0
+    LAT_ROLLOFF_ZERO_DEG = 32.0
     HG_A1, HG_B1 = 3.33, 0.63
     HG_A2, HG_B2 = 1.87, 1.22
     HG_G = 0.15
@@ -650,10 +754,54 @@ def feature_engineering(orb):
     vis_orbit_flux_opp_arr = np.empty(N, dtype=np.float64)
     # vis_mag_timeavg_arr = np.empty(N, dtype=np.float64)
     vis_orbit_flux_multi_arr = np.empty(N, dtype=np.float64)
+    vis_orbit_mag_multi_old_arr = np.empty(N, dtype=np.float64)
     vis_orbit_mag_multi_arr = np.empty(N, dtype=np.float64)
 
     # Earth heliocentric-longitude offsets for vis_orbit_flux_multi.
     EARTH_LON_OFFSETS_RAD = np.radians(np.array([0.0, 30.0, 60.0]))
+
+    # --- vis_orbit_mag_multi configuration ----------------------------------
+    # (NEO-aware revision; the legacy opposition-clamped version is retained as
+    # vis_orbit_mag_multi_old.)
+    # The legacy vis_orbit_mag_multi_old / vis_orbit_flux_multi columns clamp
+    # Earth near the asteroid's longitude
+    # (opposition +0/+30/+60 deg). That is correct for exterior objects but
+    # actively wrong for interior / low-perihelion (q < ~1.3 AU) objects: when
+    # an asteroid is sunward of Earth, "Earth at the asteroid's longitude" is
+    # inferior CONJUNCTION (low solar elongation, near-"new" phase, lost in
+    # glare), not opposition. Such an object's only observable window is at
+    # greatest elongation, which sits at a much larger Earth-asteroid longitude
+    # separation the original sampling never reaches.
+    #
+    # This column therefore (1) sweeps Earth around the FULL synodic circle so
+    # the genuine greatest-elongation apparitions are sampled, and (2) weights every
+    # geometry by an observing-efficiency ramp on solar elongation: zero below
+    # ELONG_MIN_DEG (surveys do not point that near the Sun) ramping to full at
+    # ELONG_FULL_DEG (encoding that little survey time is spent at low
+    # elongation).
+    #
+    # The reported value is a *discoverability* magnitude, factored as
+    #     vis_orbit_mag_multi = mag_when_observable - 2.5*log10(duty_fraction)
+    # where mag_when_observable is the elongation-gated, Kepler-time-weighted
+    # mean apparent V over the geometries a survey could actually point at, and
+    # duty_fraction is the fraction of orbital time the object clears that gate.
+    # The dilution term is the key NEO fix: an interior object's maximum possible
+    # solar elongation is arcsin(Q), so deep Atens/Atiras spend little or no time
+    # observable and are penalised (made fainter) accordingly -- rather than the
+    # original column's spuriously faint value that came from averaging in
+    # near-conjunction (back-lit, sun-glare) geometry no survey ever uses. For
+    # exterior objects duty_fraction ~ the opposition half of the synodic period
+    # and the penalty is small, so they behave like the legacy
+    # vis_orbit_mag_multi_old.
+    EARTH_LON_OFFSETS_NEOFIX_RAD = np.radians(
+        np.linspace(0.0, 360.0, 24, endpoint=False)
+    )
+    ELONG_MIN_DEG = 60.0   # hard solar-avoidance floor (efficiency 0 below this)
+    ELONG_FULL_DEG = 150.0  # full observing efficiency at/above this elongation
+                            # (efficiency rises toward opposition; the model is
+                            # insensitive to this endpoint over a broad range)
+    DUTY_FLOOR = 1e-3      # caps the dilution penalty for never-observable orbits
+                           # (~1/(n_nu*n_off) resolution -> ~+7.5 mag max penalty)
 
     a_np = orb['a'].to_numpy(dtype=np.float64)
     e_np = np.clip(orb['e'].to_numpy(dtype=np.float64), 0.0, 0.999)
@@ -722,7 +870,21 @@ def feature_engineering(orb):
                  - 2.5 * np.log10(phi_blend))
         # Geocentric ecliptic latitude (not heliocentric -- matches what surveys see)
         beta_geo = np.arcsin(np.clip(dz / Delta_opp_safe, -1.0, 1.0))
-        passed = (V_app <= V_LIM) & (np.abs(beta_geo) <= LAT_LIM_RAD)
+        # Linear latitude roll-off: 1 at/below LAT_ROLLOFF_FULL_DEG, tapering to
+        # 0 at/above LAT_ROLLOFF_ZERO_DEG (replaces the old hard latitude mask).
+        beta_deg = np.degrees(np.abs(beta_geo))
+        lat_weight = np.clip(
+            (LAT_ROLLOFF_ZERO_DEG - beta_deg)
+            / (LAT_ROLLOFF_ZERO_DEG - LAT_ROLLOFF_FULL_DEG),
+            0.0, 1.0,
+        )
+        # Linear brightness roll-off: 1 at/brighter than V_ROLLOFF_FULL, tapering
+        # to 0 at/fainter than V_ROLLOFF_ZERO (replaces the old hard V cut).
+        v_weight = np.clip(
+            (V_ROLLOFF_ZERO - V_app) / (V_ROLLOFF_ZERO - V_ROLLOFF_FULL),
+            0.0, 1.0,
+        )
+        passed = v_weight * lat_weight
         spatial_disc_arr[start:end] = (
             (passed * weights).sum(axis=1) / w_sum
         )
@@ -804,7 +966,7 @@ def feature_engineering(orb):
         # geocentric distance and phase angle, while for distant objects the
         # Sun-Earth baseline is a small perturbation on the geometry.
         flux_geom_sum = flux_app  # offset = 0 (opposition); same as vis_orbit_flux_opp
-        mag_geom_sum = V_app      # For the new geometric magnitude sum
+        mag_geom_sum = V_app      # legacy magnitude sum (feeds vis_orbit_mag_multi_old)
         for offset_rad in EARTH_LON_OFFSETS_RAD[1:]:
             lambda_E = lambda_k + offset_rad
             dx_g = x_ecl - np.cos(lambda_E)
@@ -837,7 +999,81 @@ def feature_engineering(orb):
         
         mag_geom_per_nu = mag_geom_sum / float(len(EARTH_LON_OFFSETS_RAD))
         mag_geom_mean = (mag_geom_per_nu * weights).sum(axis=1) / w_sum
-        vis_orbit_mag_multi_arr[start:end] = mag_geom_mean
+        vis_orbit_mag_multi_old_arr[start:end] = mag_geom_mean
+
+        # ----------------------------------------------------------------------
+        # vis_orbit_mag_multi: NEO-aware sibling of legacy vis_orbit_mag_multi_old.
+        # Earth is swept around the full synodic circle (not just opposition
+        # +0/+30/+60), and each (asteroid-anomaly, Earth-longitude) geometry is
+        # weighted by w_kepler * obs_eff, where obs_eff ramps the solar-
+        # elongation gate from 0 below ELONG_MIN_DEG to 1 at/above ELONG_FULL_DEG.
+        # We accumulate the gated mean apparent V (mag_when_observable) and the
+        # gate duty cycle; the final discoverability magnitude is then
+        # mag_when_observable - 2.5*log10(duty_fraction). See the configuration
+        # block above for the physical rationale.
+        neofix_num = np.zeros(end - start, dtype=np.float64)      # sum V * w * obs_eff
+        neofix_den = np.zeros(end - start, dtype=np.float64)      # sum w * obs_eff
+        neofix_num_all = np.zeros(end - start, dtype=np.float64)  # fallback: ungated sum V * w
+        for offset_rad in EARTH_LON_OFFSETS_NEOFIX_RAD:
+            lambda_E_n = lambda_k + offset_rad
+            cos_E_n = np.cos(lambda_E_n)
+            sin_E_n = np.sin(lambda_E_n)
+            dx_n = x_ecl - cos_E_n
+            dy_n = y_ecl - sin_E_n
+            # Earth z = 0, so dz_n = z_ecl (unchanged across Earth offsets)
+            Delta_n = np.sqrt(dx_n * dx_n + dy_n * dy_n + z_ecl * z_ecl)
+            Delta_n_safe = np.maximum(Delta_n, eps_val)
+            cos_alpha_n = np.clip(
+                (r_orb ** 2 + Delta_n ** 2 - 1.0) / (2.0 * r_safe * Delta_n_safe),
+                -1.0, 1.0
+            )
+            alpha_n = np.arccos(cos_alpha_n)
+            tan_half_n = np.maximum(np.tan(alpha_n / 2.0), 0.0)
+            phi1_n = np.exp(-HG_A1 * np.power(tan_half_n, HG_B1))
+            phi2_n = np.exp(-HG_A2 * np.power(tan_half_n, HG_B2))
+            phi_blend_n = np.maximum(
+                (1.0 - HG_G) * phi1_n + HG_G * phi2_n, PHI_FLOOR
+            )
+            V_n = (H_c
+                   + 5.0 * np.log10(r_safe * Delta_n_safe)
+                   - 2.5 * np.log10(phi_blend_n))
+
+            # Solar elongation: angle Sun-Earth-asteroid as seen from Earth.
+            # Earth->Sun is the unit vector -(cos lambda_E, sin lambda_E, 0);
+            # Earth->asteroid is (dx_n, dy_n, z_ecl) with length Delta_n.
+            cos_elong_n = np.clip(
+                (-cos_E_n * dx_n - sin_E_n * dy_n) / Delta_n_safe, -1.0, 1.0
+            )
+            elong_deg_n = np.degrees(np.arccos(cos_elong_n))
+            obs_eff = np.clip(
+                (elong_deg_n - ELONG_MIN_DEG) / (ELONG_FULL_DEG - ELONG_MIN_DEG),
+                0.0, 1.0
+            )
+
+            w_cell = weights * obs_eff  # (chunk, N_ANOMALY_SAMPLES)
+            neofix_num += (V_n * w_cell).sum(axis=1)
+            neofix_den += w_cell.sum(axis=1)
+            
+            neofix_num_all += (V_n * weights).sum(axis=1)
+
+        # Base term: brightness during the observable windows (mag-space mean
+        # over gated geometries). For objects with no observable geometry (deep
+        # interior orbits whose max elongation never clears ELONG_MIN_DEG) fall
+        # back to the ungated full-circle mean so the base stays finite; the
+        # duty penalty below then drives the result faint.
+        n_off = float(len(EARTH_LON_OFFSETS_NEOFIX_RAD))
+        total_weight = np.maximum(w_sum * n_off, eps_val)
+        mean_obs = neofix_num / np.maximum(neofix_den, eps_val)
+        mean_all = neofix_num_all / total_weight
+        mag_when_obs = np.where(neofix_den > eps_val, mean_obs, mean_all)
+
+        # Duty-cycle dilution: fraction of orbital time the object clears the
+        # elongation gate, converted to a magnitude penalty (duty=1 -> 0 penalty;
+        # rarely/never observable -> large positive, i.e. fainter; floored so the
+        # never-observable case stays finite).
+        duty_fraction = neofix_den / total_weight
+        duty_penalty = -2.5 * np.log10(np.maximum(duty_fraction, DUTY_FLOOR))
+        vis_orbit_mag_multi_arr[start:end] = mag_when_obs + duty_penalty
 
     # orb["mean_opp_dec"] = mean_opp_dec_arr.astype(float)
     orb["spatial_discoverability_fraction"] = spatial_disc_arr.astype(float)
@@ -847,6 +1083,7 @@ def feature_engineering(orb):
     orb["vis_orbit_flux_opp"] = vis_orbit_flux_opp_arr.astype(float)
     # orb["vis_mag_timeavg"] = vis_mag_timeavg_arr.astype(float)
     orb["vis_orbit_flux_multi"] = vis_orbit_flux_multi_arr.astype(float)
+    # orb["vis_orbit_mag_multi_old"] = vis_orbit_mag_multi_old_arr.astype(float)
     orb["vis_orbit_mag_multi"] = vis_orbit_mag_multi_arr.astype(float)
 
     # ============================================================================
@@ -923,7 +1160,7 @@ def feature_engineering(orb):
 
         orb["vis_last_perihelion"] = V_peri.astype(float)
         orb["perihelion_delta_true"] = Delta_p.astype(float)
-        orb["perihelion_dec_true"] = dec_peri_true.astype(float)
+        orb["perihelion_dec_true"] = np.degrees(dec_peri_true.astype(float))
 
         # --- Second-to-last perihelion -----------------------------------------
         # One orbital period (P = 2*pi / n) earlier than t_peri. To first order the
@@ -1010,37 +1247,52 @@ def feature_engineering(orb):
         orb["vis_3rd_last_perihelion"] = V_peri3.astype(float)
 
         # ====================================================================
-        # BRIGHTNESS AT THE LAST FIVE OPPOSITIONS
+        # BRIGHTNESS AT THE LAST 17 EQUAL-LONGITUDE APPARITIONS
         # ====================================================================
-        # Opposition is the instant the asteroid and Earth share the same
-        # heliocentric ecliptic longitude (the asteroid sits opposite the Sun in
-        # the sky): the geometry of each apparition's peak brightness -- minimum
-        # solar phase angle and near-minimum geocentric distance. Unlike perihelion
-        # it is NOT a fixed orbital position; it recurs once per synodic period at
-        # times set by the Earth-asteroid longitude beat, so each opposition must be
-        # solved for. We locate the five most recent oppositions before the catalog
-        # epoch and evaluate the IAU (H, G) apparent V at each.
+        # The solver below finds equal-heliocentric-longitude events,
+        # lambda_ast == lambda_earth. For exterior objects these are true
+        # oppositions, but for Earth-crossing objects they can also be inferior
+        # conjunctions. We therefore treat them generically as apparitions and
+        # evaluate the actual IAU (H, G) apparent V at each solved geometry.
+        # Unlike perihelion this is NOT a fixed orbital position; it recurs once
+        # per synodic period at times set by the Earth-asteroid longitude beat.
+        # We locate the 17 most recent equal-longitude apparitions before the
+        # catalog epoch and evaluate the apparent V at each.
         #
         # Method:
-        #   (1) A linear mean-longitude model gives each opposition time to within a
+        #   (1) A linear mean-longitude model gives each event time to within a
         #       fraction of a synodic period. The synodic angle is
         #           psi(t) = lambda_ast(t) - lambda_earth(t),
-        #       and oppositions are psi == 0 (mod 2*pi). The asteroid mean longitude
-        #       is varpi + M(t) with varpi = Node + Peri; Earth's is the Meeus mean.
+        #       so equal-longitude events satisfy psi == 0 (mod 2*pi). The asteroid
+        #       mean longitude is varpi + M(t) with varpi = Node + Peri; Earth's is
+        #       the Meeus mean.
         #   (2) A few Newton steps on the TRUE psi(t) -- lambda_ast from a Kepler
         #       solve (so eccentricity and inclination enter exactly) and
         #       lambda_earth from the analytic Meeus ephemeris -- refine each time.
         #       Steps are clamped to +/- half a synodic period so each estimate stays
-        #       locked to its own opposition. Because V is at a local minimum at
-        #       opposition, residual timing error contributes negligibly to V.
+        #       locked to its own event window. For true oppositions V is near a
+        #       local minimum, so residual timing error contributes negligibly to V.
         #
-        # All five share the same per-object orbital elements (no precession over the
-        # few-year lookback). Interior objects (aphelion < 1 AU) never reach
-        # opposition; for them the equal-longitude alignment is inferior conjunction
-        # and the returned V is correspondingly faint -- the honest signal that such
-        # objects lack good apparitions.
+        # All 17 share the same per-object orbital elements (no precession over
+        # the few-year lookback). Fully interior objects (aphelion < 1 AU) never
+        # reach true opposition; for them every equal-longitude alignment is an
+        # inferior conjunction and the returned V is correspondingly faint.
         TWO_PI = 2.0 * np.pi
-        N_OPP = 5
+        N_OPP = 17
+        # Reliability window for the equal-longitude solver. Objects with periods
+        # near 1 yr have a near-zero synodic rate, so the synodic period (the
+        # spacing between successive equal-longitude apparitions) diverges and the
+        # five "most recent" events can be spread over centuries. Over such spans
+        # the fixed-element approximation and the low-precision analytic Earth
+        # ephemeris used here are no longer trustworthy, so any solved event older
+        # than this is treated as "no usable recent apparition."
+        OPP_MAX_LOOKBACK_DAYS = 20.0 * 365.25
+        # Faint sentinel assigned to out-of-window events: fainter than any survey
+        # detection limit (the deepest single-visit depths are ~24.5-26), so the
+        # model reads it as effectively unobservable. The precise value is
+        # unimportant for tree-based models provided it sits clearly in the
+        # undetectable regime and is applied consistently.
+        VIS_OPP_FAINT = 28.0
 
         def _wrap_pi(ang):
             return (ang + np.pi) % TWO_PI - np.pi
@@ -1095,7 +1347,8 @@ def feature_engineering(orb):
         n_syn_safe = np.where(np.abs(n_syn) < 1e-12, 1e-12, n_syn)
         P_syn = TWO_PI / np.abs(n_syn_safe)  # synodic period (days), > 0
 
-        # (1) Linear initial guesses for the five most recent oppositions <= Epoch.
+        # (1) Linear initial guesses for the five most recent equal-longitude
+        #     apparitions <= Epoch.
         varpi = Node_rad + Peri_rad
         psi_E = _wrap_pi((varpi + M0) - _earth_lon(Epoch_jd))
         t_near = Epoch_jd - psi_E / n_syn_safe
@@ -1105,7 +1358,8 @@ def feature_engineering(orb):
         t_guess = t_opp.copy()
         half_syn = 0.5 * P_syn[:, None]
 
-        # (2) Newton refinement on the true synodic angle, clamped to each window.
+        # (2) Newton refinement on the true synodic angle, clamped to each event
+        #     window.
         for _ in range(4):
             M_o = (M0_col + n_col * (t_opp - Epoch_col)) % TWO_PI
             E_o = _kepler_E(M_o, e_col)
@@ -1123,7 +1377,7 @@ def feature_engineering(orb):
             t_opp = t_opp - psi / n_syn_safe[:, None]
             t_opp = np.clip(t_opp, t_guess - half_syn, t_guess + half_syn)
 
-        # Final apparent V at each refined opposition time.
+        # Final apparent V at each refined equal-longitude apparition.
         M_o = (M0_col + n_col * (t_opp - Epoch_col)) % TWO_PI
         E_o = _kepler_E(M_o, e_col)
         nu_o = 2.0 * np.arctan2(
@@ -1160,35 +1414,99 @@ def feature_engineering(orb):
                  + 5.0 * np.log10(r_o_safe * Delta_o_safe)
                  - 2.5 * np.log10(phi_blend_o))  # (N, 5), col 0 = most recent
 
+        # Replace events whose solved time falls outside the reliable lookback
+        # window with a faint sentinel (see OPP_MAX_LOOKBACK_DAYS / VIS_OPP_FAINT).
+        # This guards the near-1-yr-period regime, whose diverging synodic period
+        # otherwise places "recent" apparitions centuries before the epoch where
+        # the fixed-element reconstruction is meaningless. For such objects all
+        # 17 events fall out of window and every vis_opp_* collapses to the
+        # sentinel, correctly flagging the absence of a usable recent apparition.
+        stale = (Epoch_col - t_opp) > OPP_MAX_LOOKBACK_DAYS
+        V_opp = np.where(stale, VIS_OPP_FAINT, V_opp)
+
         for j in range(N_OPP):
             orb[f"vis_opp_{j + 1}"] = V_opp[:, j].astype(float)
 
-        # create vis_opp_1 through vis_opp_5 columns for the five most recent oppositions, with vis_opp_1
-        orb["vis_opp_1"] = V_opp[:, 0].astype(float)  # most recent opposition  
-        orb["vis_opp_2"] = V_opp[:, 1].astype(float)  # second most recent opposition
-        orb["vis_opp_3"] = V_opp[:, 2].astype(float)  # third most recent opposition
-        orb["vis_opp_4"] = V_opp[:, 3].astype(float)  # fourth most recent opposition
-        orb["vis_opp_5"] = V_opp[:, 4].astype(float)  # fifth most recent
-
-        # Summary statistics across the five oppositions. vis_opp_min is the
-        # brightest (best) apparition; vis_opp_max the faintest; mean/median
-        # describe the typical apparition brightness.
+        # Summary statistics across the 17 solved apparitions. vis_opp_min is
+        # the brightest event; vis_opp_max the faintest; mean/median describe
+        # the typical apparition brightness.
         orb["vis_opp_mean"] = V_opp.mean(axis=1).astype(float)
+        orb["vis_opp_mean_5"] = V_opp[:, :5].mean(axis=1).astype(float)
         orb["vis_opp_median"] = np.median(V_opp, axis=1).astype(float)
         orb["vis_opp_min"] = V_opp.min(axis=1).astype(float)
         orb["vis_opp_max"] = V_opp.max(axis=1).astype(float)
+
+        # Count of how many of the N_OPP solved apparitions reached a "clearly
+        # bright" apparent magnitude (V < VIS_OPP_BRIGHT_MAG). Linkage is a
+        # best-of-N process, so the *number* of times an object was bright enough
+        # to be detected is a more direct observability signal than the mean
+        # brightness alone. Stale out-of-window events carry the faint sentinel
+        # (V=28) and so never count toward this total.
+        VIS_OPP_BRIGHT_MAG = 21.0
+        orb["opp_bright_count"] = (V_opp < VIS_OPP_BRIGHT_MAG).sum(axis=1).astype(float)
+
+        # ====================================================================
+        # EXPERIMENTAL vis_opp VARIANTS (do not modify vis_opp_mean itself)
+        # ====================================================================
+        # Two independent upgrades to the recent-apparition brightness signal,
+        # plus their combination:
+        #
+        #   (A) flux-domain averaging (vis_opp_fluxsum). vis_opp_mean is the
+        #       arithmetic mean of the five apparition MAGNITUDES, which equals
+        #       the GEOMETRIC mean of their fluxes -- a statistic that discards
+        #       the spread across apparitions. But linkage is a best-of-N
+        #       process: an object accrues an opposition if ANY apparition is
+        #       bright enough, not if the typical one is. Averaging in linear
+        #       flux (-2.5 log10 of the mean flux) instead is a smooth
+        #       "brightest apparition" that rewards bright outliers the mean
+        #       throws away (Jensen gap). It is brighter than vis_opp_mean and
+        #       sits between vis_opp_mean and vis_opp_min.
+        #
+        #   (B) observability dilution (the _disc suffix). vis_opp_mean is a
+        #       pure brightness term with no notion of how OFTEN the object is
+        #       well placed -- unlike vis_orbit_mag_multi, which is
+        #       V_obs - 2.5 log10(f_duty). We supply the missing duty half from
+        #       spatial_discoverability_fraction (the orbit-time fraction the
+        #       object is simultaneously bright enough and near enough the
+        #       ecliptic to be discoverable), yielding a discoverability
+        #       magnitude built on the more-exact real-ephemeris brightness.
+        DISC_FRAC_FLOOR = 1e-3  # caps the dilution penalty (~+7.5 mag max)
+        disc_penalty = -2.5 * np.log10(
+            np.maximum(
+                orb["spatial_discoverability_fraction"].to_numpy(dtype=np.float64),
+                DISC_FRAC_FLOOR,
+            )
+        )
+
+        # (A) flux-domain mean of the five apparition fluxes, back in mag.
+        # Floor the mean flux at 1e-30 (V ~= 75) to keep log10 finite; the
+        # stale-event sentinel (V=28) already contributes negligible flux.
+        flux_opp_mean = np.power(10.0, -0.4 * V_opp).mean(axis=1)
+        vis_opp_fluxsum = -2.5 * np.log10(np.maximum(flux_opp_mean, 1e-30))
+        orb["vis_opp_fluxsum"] = vis_opp_fluxsum.astype(float)
+
+        # (B) discoverability-diluted variants of the two brightness terms.
+        orb["vis_opp_mean_disc"] = (
+            orb["vis_opp_mean"].to_numpy(dtype=np.float64) + disc_penalty
+        ).astype(float)
+        orb["vis_opp_fluxsum_disc"] = (vis_opp_fluxsum + disc_penalty).astype(float)
     else:
         orb["vis_last_perihelion"] = np.nan
         orb["perihelion_delta_true"] = np.nan
         orb["perihelion_dec_true"] = np.nan
         orb["vis_2nd_last_perihelion"] = np.nan
         orb["vis_3rd_last_perihelion"] = np.nan
-        for j in range(5):
+        for j in range(17):
             orb[f"vis_opp_{j + 1}"] = np.nan
         orb["vis_opp_mean"] = np.nan
+        orb["vis_opp_mean_5"] = np.nan
         orb["vis_opp_median"] = np.nan
         orb["vis_opp_min"] = np.nan
         orb["vis_opp_max"] = np.nan
+        orb["opp_bright_count"] = np.nan
+        orb["vis_opp_fluxsum"] = np.nan
+        orb["vis_opp_mean_disc"] = np.nan
+        orb["vis_opp_fluxsum_disc"] = np.nan
 
     return orb
 
@@ -1197,14 +1515,9 @@ def feature_engineering(orb):
 # CONVENIENCE FUNCTIONS
 # ==============================================================================
 
-def load_all_databases(apply_filters=True):
+def load_all_databases():
     """
     Load all orbit databases (MPC, AstDyS, JPL) and merge them.
-    
-    Parameters
-    ----------
-    apply_filters : bool, optional
-        Whether to apply filter lists (default: True)
     
     Returns
     -------
@@ -1212,7 +1525,7 @@ def load_all_databases(apply_filters=True):
         Combined orbit dataframe with all databases merged
     """
     print("Loading MPC orbits...")
-    orb = load_mpc_orbits(apply_filters=apply_filters)
+    orb = load_mpc_orbits()
     
     print("Loading astrometry counts...")
     orb = load_astrometry_counts(orb)
@@ -1264,7 +1577,7 @@ def load_all_databases(apply_filters=True):
 # EXTENSION DIFFICULTY CLASSIFIER
 # ==============================================================================
 
-def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter out unless updated.csv"):
+def train_extension_difficulty_classifier(orb_pred, final, orb, filter_csv="filter out unless updated.csv"):
     """
     Train extension difficulty classifier using iterative refinement.
     
@@ -1300,9 +1613,29 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
         df["v_mag_gap_1"] = df["v_mag_max"] - df["v_mag_avg"]
         df["v_mag_gap_2"] = df["v_mag_avg"] - df["v_mag_min"]
 
+    def _weighted(df, target_n=None, frac=None, default_weight = 1.0):
+        """Attach a per-row sampling weight so the whole list is used instead of
+        being subsampled, then fed to XGBoost via sample_weight.
+
+        - target_n: weight = target_n / len(df), reproducing the effective
+          contribution of df.sample(target_n) without dropping any rows.
+        - frac: weight = frac, reproducing df.sample(frac=...).
+        - neither: weight = 1.0, for lists that were already used in full.
+        """
+        n = len(df)
+        if frac is not None:
+            w = frac
+        elif target_n is not None and n > 0:
+            w = target_n / n
+        else:
+            w = default_weight
+        return df.assign(weight=w)
+
     # Load filter list, only keep the mislinkage comments
     filter_out_unless_updated = pd.read_csv(filter_csv)
     filter_out_unless_updated = filter_out_unless_updated[filter_out_unless_updated["reason"].str.contains("misl", case=False, na=False)]
+    multiopp_mislinkages = pd.read_csv("filter until further notice.csv")
+    multiopp_mislinkages = multiopp_mislinkages[multiopp_mislinkages["reason"].str.contains("misl", case=False, na=False)]
     
     # Exclude recent observations and objects without astrometry metadata
     # Anything with E2026 may be too recent to have had the ITF community complete the extension if it is possible to extend.
@@ -1344,32 +1677,48 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
         & (use_to_train_misl["Perihelion_dist"].between(1.6, 3.5))]
     
     # Objects in filter list and 2-3 opposition high-prob objects.
-    # Reload from the cached raw MPC dump so Arc_length is the original (pre
-    # apply_num_opps_overrides nulling), which is what the filter CSV matches.
-    orb = load_mpc_orbits(apply_filters=False)
-    orb = load_astrometry_counts(orb)
-    orb = apply_nights_overrides(orb)
     poss_misl_or_unc_named = orb.merge(
         filter_out_unless_updated.rename(columns={"Object": "Principal_desig"})[["Principal_desig", "Arc_length"]],
         on=["Principal_desig", "Arc_length"],
         how="inner"
     )
+    poss_multi_opp_mislinkages_named = orb.merge(
+        multiopp_mislinkages.rename(columns={"Object": "Principal_desig"})[["Principal_desig"]],
+        on=["Principal_desig"],
+        how="inner"
+    )
     print(f"Positive examples from filter list: {len(poss_misl_or_unc_named)}")
+    print(f"Positive examples from multi-opp mislinkages: {len(poss_multi_opp_mislinkages_named)}")
+    
     poss_misl_or_unc_23opp = use_to_train_misl[
-        (use_to_train_misl["prob"] > 0.99) & 
-        (use_to_train_misl["Num_opps"].between(2, 3))
+        (use_to_train_misl["prob"] > 0.985) & 
+        (use_to_train_misl["Num_opps"].between(2, 3)) &
+        (use_to_train_misl["nights_total"] <= 10)
+    ]
+
+    # all objects with longest arc less than 5 days yet either 2 or 3 opps and nights_total <=7
+    poss_misl_or_unc_lt5day_arc_23opp = use_to_train_misl[
+        (use_to_train_misl["prob"] > 0.98)
+        & (use_to_train_misl["Num_opps"].between(2, 3))
+        & (use_to_train_misl["longest_opp_arc"] < 5)
+        & (use_to_train_misl["nights_total"] <= 7)
     ]
     
     # Combine positive examples
     poss_misl_or_unc = pd.concat([
-        poss_misl_or_unc_23opp,
-        poss_misl_or_unc_lt4nights,
-        poss_misl_or_unc_ge4nights.sample(frac=0.2, random_state=42),
-        poss_misl_or_unc_named,
-        poss_misl_or_unc_1opp_high_magresids
+        _weighted(poss_misl_or_unc_23opp),
+        _weighted(poss_misl_or_unc_lt4nights),
+        _weighted(poss_misl_or_unc_ge4nights, frac=0.2),
+        _weighted(poss_misl_or_unc_named),
+        _weighted(poss_multi_opp_mislinkages_named),
+        _weighted(poss_misl_or_unc_1opp_high_magresids),
+        _weighted(poss_misl_or_unc_lt5day_arc_23opp, default_weight=5)
     ])
-    
-    # Remove duplicates
+
+    # Remove duplicates, keeping the highest-weight copy of each object
+    poss_misl_or_unc = poss_misl_or_unc.sort_values(
+        "weight", ascending=False, kind="stable"
+    )
     poss_misl_or_unc = poss_misl_or_unc[
         ~poss_misl_or_unc.index.duplicated(keep='first')
     ]
@@ -1417,6 +1766,11 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
         (use_to_train_misl["Num_opps"] == 3)
     ]
 
+    # objects with opp_with_second_most_nights > 1
+    likely_okay_2_nights_second_opp = use_to_train_misl[
+        use_to_train_misl["opp_with_second_most_nights"] == 2
+    ]
+
     # low mag and astrometric residuals
     likely_okay_lowresids = likely_okay[
         (likely_okay["second_minmax_gap"] < 0.8)
@@ -1425,34 +1779,36 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
       & (likely_okay["prob"]<0.4)
       & (likely_okay["rms"] < 0.09)]
     
-    # Balanced sampling of negative examples
+    # Balanced weighting of negative examples (full lists, weighted in place of
+    # the prior per-list subsampling)
     likely_okay = pd.concat([
-        likely_okay_gt5_nights_single_opp.sample(5000, random_state=91),
-        likely_okay.sample(6000, random_state=42),
-        likely_okay_heavier.sample(7000, random_state=11),
-        likely_okay_gt3_opps.sample(2000, random_state=10),
-        likely_okay_gt4_opps_short_init_arc.sample(500, random_state=9),
-        likely_okay_4night.sample(4000, random_state=12),
-        likely_okay_3opp.sample(500, random_state=8),
-        likely_okay_lowresids
+        _weighted(likely_okay_gt5_nights_single_opp, 5000),
+        _weighted(likely_okay, 6000),
+        _weighted(likely_okay_heavier, 7000),
+        _weighted(likely_okay_gt3_opps, 2000),
+        _weighted(likely_okay_gt4_opps_short_init_arc, 500),
+        _weighted(likely_okay_4night, 4000),
+        _weighted(likely_okay_3opp, 500),
+        _weighted(likely_okay_lowresids),
+        _weighted(likely_okay_2_nights_second_opp, 2000),
     ])
 
-    # Remove duplicates
+    # Remove duplicates, keeping the highest-weight copy of each object
+    likely_okay = likely_okay.sort_values(
+        "weight", ascending=False, kind="stable"
+    )
     likely_okay = likely_okay[
         ~likely_okay.index.duplicated(keep='first')
     ]
 
     likely_okay["label"] = 0
     print(f"Negative examples (low extension difficulty): {len(likely_okay)}")
-    
+
     # =========================================================================
     # CLASSIFIER TRAINING WITH ITERATIVE REFINEMENT
     # =========================================================================
     
     misl_training = pd.concat([poss_misl_or_unc, likely_okay])
-
-    # drop any rows where the same index appears in both positive and negative class (conflicting labels)
-    misl_training = misl_training[~misl_training.index.duplicated(keep=False)]
 
     # Define feature columns
     misl_cols = [
@@ -1475,8 +1831,9 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
         
         # Train main classifier
         xgb_misl.fit(
-            misl_training_mlcols.drop(columns=["label"]), 
-            misl_training_mlcols["label"]
+            misl_training_mlcols.drop(columns=["label"]),
+            misl_training_mlcols["label"],
+            sample_weight=misl_training["weight"],
         )
         final["extension_difficulty"] = xgb_misl.predict_proba(
             final[misl_cols[:-1]].astype(float)
@@ -1484,8 +1841,9 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
         
         # Train simplified classifier (for missing astrometry data)
         xgb_misl_simple.fit(
-            misl_training_mlcols[misl_cols_simple], 
-            misl_training_mlcols["label"]
+            misl_training_mlcols[misl_cols_simple],
+            misl_training_mlcols["label"],
+            sample_weight=misl_training["weight"],
         )
         final["extension_difficulty_simple"] = xgb_misl_simple.predict_proba(
             final[misl_cols_simple].astype(float)
@@ -1503,7 +1861,7 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
     misl_training["mr_temp"] = xgb_misl.predict_proba(
         misl_training[misl_cols[:-1]].astype(float)
     )[:, 1]
-    
+
     # First refinement: Remove obvious mislabels
     misl_training = misl_training[~(
         (misl_training["label"] == 1) & (misl_training["mr_temp"] < 0.15)
@@ -1519,7 +1877,7 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
     misl_training["mr_temp"] = xgb_misl.predict_proba(
         misl_training[misl_cols[:-1]].astype(float)
     )[:, 1]
-    
+
     # Second refinement: More aggressive filtering of positive class
     misl_training = misl_training[~(
         (misl_training["label"] == 1) & (misl_training["mr_temp"] < 0.04)
@@ -1535,3 +1893,32 @@ def train_extension_difficulty_classifier(orb_pred, final, filter_csv="filter ou
     )[:, 1]
     
     return orb_pred, final
+
+def calc_jd(year, month, day):
+    import numpy as np
+    y = year.copy()
+    m = month.copy()
+    mask = m <= 2
+    y[mask] -= 1
+    m[mask] += 12
+    A = np.floor(y / 100)
+    B = 2 - A + np.floor(A / 4)
+    B[y < 1582] = 0
+    B[(y == 1582) & (month < 10)] = 0
+    B[(y == 1582) & (month == 10) & (day <= 4)] = 0
+    return np.floor(365.25 * (y + 4716)) + np.floor(30.6001 * (m + 1)) + day + B - 1524.5
+
+def getFinal(orb_pred,known_strongly_suspected_active_objects):
+    final = orb_pred.copy()
+
+    # renames of Perihelion_dist to q and Aphelion_dist to Q for brevity
+    final.rename(columns={"Perihelion_dist":"q","Aphelion_dist":"Q"},inplace=True)
+    final.set_index("Principal_desig", inplace=True)
+
+    # Calculate "quantile deficit"
+    final['DeltaQ'] = final["quantile_Opps"]-final["Num_opps"]
+    final.sort_values("DeltaQ",ascending=False, inplace=True)
+
+    # Mark which ones are known or strongly suspected
+    final["Known / Strong Suspect"] = final.index.isin(known_strongly_suspected_active_objects)
+    return final

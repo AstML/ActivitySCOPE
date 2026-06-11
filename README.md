@@ -64,7 +64,7 @@ The current implementation is provided in the Jupyter Notebook: `ActivitySCOPE_s
 
 ActivitySCOPE has successfully identified numerous active objects, including:
 
-*   **Confirmed Comets/Active Asteroids:** P/2023 JN16, 2008 BJ22, 2025 VZ8, 489P/Denning, 2010 RH69.
+*   **Confirmed Comets/Active Asteroids:** P/2025 UX109 (Ye), P/2023 JN16 (Lemmon), P/2022 BV9 (Lemmon), P/2017 FL36 (PANSTARRS), 489P/Denning, 2008 BJ22, 2025 VZ8, 2010 RH69.
 *   **Highly Likely Candidates:** 2001 BV70.
 
 ### Interpreting Results

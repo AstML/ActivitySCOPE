@@ -1,28 +1,25 @@
 designation,group,confirmed,note,nopp_dagger
-2010 RH69,cometary,1,\notecell{Thule-family comet identified independently by this work},0
-2001 BV70,cometary,0,\notecell{High-confidence candidate; archival confirmation unavailable},0
-P/2022 BV9 (Lemmon),cometary,1,"\notecell{Identified by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/31369}.}}",1
-P/2025 UX109 (Ye),cometary,1,"\notecell{Independent identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/34359}.}}",0
-2019 OE31,cometary,1,\notecell{\citet{oldroydCometaryActivityDiscovered2023}},0
-282P/(323137) 2003 BM80,cometary,1,"\notecell{\citet{2022ApJ...937L...2C,chandlerActiveAsteroidsCitizen2024}}",0
+2010 RH69,cometary,1,\notecell{Comet identified independently by this work},0
 (457175) 2008 GO98,cometary,1,\notecell{\citet{2017CBET.4411....1L}},0
+282P/(323137) 2003 BM80,cometary,1,"\notecell{\citet{2022ApJ...937L...2C,chandlerActiveAsteroidsCitizen2024}}",0
 2017 QN84,cometary,1,"\notecell{\citet{chandlerActiveAsteroidsCitizen2024,2025epsc.conf.1661F}}",0
-2018 BJ11,cometary,0,\notecell{Candidate transitional object; independent discovery from K.\ Ly who has reported activity on 2023 June 18 that remains unpublished},0
-2008 VK110,cometary,1,\notecell{Sam researched this pre-ActivitySCOPE flagging. One-night cometary in F51 archives. Centaur.},0
-2024 XE22,cometary,0,\notecell{Candidate; under investigation},1
-2009 DP2,cometary,1,"\notecell{New Discovery, predicted on comets-ml in 2025; recovered in 2026 with reported activity}",1
-2012 XK149,cometary,0,Moderate confidence candidate,0
+2008 VK110,cometary,1,"\notecell{Identified by \activityscope{}; Centaur-like Jupiter crosser with one night of activity}",0
+2019 OE31,cometary,1,\notecell{\citet{oldroydCometaryActivityDiscovered2023}},0
+2001 BV70,cometary,0,\notecell{High-confidence candidate; archival confirmation unavailable},0
+2018 BJ11,cometary,0,"\notecell{Independent identification of transitional object; Possible activity reported\tabnote{K. Ly, personal communication}}",0
+P/2025 UX109 (Ye),cometary,1,"\notecell{Independent identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/34359}.}}",0
+P/2022 BV9 (Lemmon),cometary,1,"\notecell{Identified by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/31369}.}}",1
 489P/Denning,cometary,1,"\notecell{Recovered after 130 yr; initial identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/32365}.}}",1
-P/2023 JN16 (Lemmon),asteroidal,1,"\notecell{Initial identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/38758}.}; \citet{2024MPEC....Q....4.,2024CBET.5430....1A,2024DPS....5620804T,2025epsc.conf..471A,2025AcA....75..343B}}",1
+2024 XE22,cometary,0,\notecell{Candidate; under investigation},1
+2009 DP2,cometary,1,"\notecell{Identified by \activityscope\; recovered active in 2026\tabnote{D. Rankin, \url{https://groups.io/g/comets-ml/message/34992}}}",1
 2008 BJ22,asteroidal,1,"\notecell{Initial identification by \activityscope\tabnote{S. Deen, \url{https://groups.io/g/comets-ml/message/31013}.}; \citet{2023RNAAS...7...48D}}",0
-2025 HV38,asteroidal,0,"\notecell{Almost certainly active, under investigation (QZ)}",0
-2007 VB146,asteroidal,0,\notecell{Negative archival recovery},0
-2015 BC566,asteroidal,1,S. Deen found activity,0
+2025 HV38,asteroidal,0,"\notecell{Almost certainly active, under investigation (QZ has images)}",0
+2007 VB146,asteroidal,0,\notecell{Negative archival recovery; very high confidence candidate},0
+2015 BC566,asteroidal,1,\notecell{Identified by \activityscope; Active in DECam and MegaCam},0
 2025 VZ8,asteroidal,1,"\notecell{Initial identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/mpml/message/41136}.}; \citet{2026RNAAS..10....1H}}",0
-2021 AY8,asteroidal,0,\notecell{Likely active},0
-2009 FP8,asteroidal,0,"\notecell{Negative archival recovery, likely active}",0
-2010 TR241,asteroidal,0,\notecell{Moderate to high confidence!},0
+2009 FP8,asteroidal,0,"\notecell{Negative archival recovery, very high confidence candidate}",0
+2021 AY8,asteroidal,1,\notecell{Identified by \activityscope; Confirmed active in DECam and Pan-STARRS archives},0
+2010 TR241,asteroidal,0,"\notecell{Negative archival recovery, high confidence candidate}",0
+P/2023 JN16 (Lemmon),asteroidal,1,"\notecell{Initial identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/mpml/message/38758}.}; \citet{2024MPEC....Q....4.,2024CBET.5430....1A,2024DPS....5620804T,2025epsc.conf..471A,2025AcA....75..343B}}",1
+2002 CW116,asteroidal,1,"\notecell{Identified by \activityscope; confirmed active in SDSS archives\tabnote{P. VanWylen, S. Deen \url{https://groups.io/g/mpml/topic/104468465}}}",0
 P/2017 FL36 (PANSTARRS),asteroidal,1,"\notecell{Initial identification by \activityscope\tabnote{P. VanWylen, \url{https://groups.io/g/comets-ml/message/33447}.}; \citet{2025CBET.5551....1L,2025MPEC....H...86C}}",0
-2002 CW116,asteroidal,0,\notecell{Likely active?},0
-2005 XN58,asteroidal,0,\notecell{Low-confidence candidate},0
-2017 PZ20,asteroidal,0,\notecell{Low-confidence candidate},0

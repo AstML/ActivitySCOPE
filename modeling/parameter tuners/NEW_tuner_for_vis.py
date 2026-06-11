@@ -68,7 +68,20 @@ from sklearn.metrics import mean_poisson_deviance, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from xgboost import XGBRegressor
 
-import activityscope_utils as utils
+# This tuner lives in modeling/parameter tuners/ but imports the repo-root
+# activityscope_utils module and reads data files (CSVs, JSON, the MPCORB
+# cache) by repo-root-relative paths. Put the repo root on sys.path and make
+# it the working directory so both resolve regardless of the launch directory.
+import os
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+os.chdir(_REPO_ROOT)
+
+import activityscope_utils as utils  # noqa: E402  (after sys.path bootstrap)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +154,7 @@ def visibility(a, e, H, family, d):
         alpha_max = np.arcsin(np.minimum(1.0 / r_safe, 1.0))
         return 5.0 * np.log10(r_safe * delta) + H + d * alpha_max
     if family == "super5":
-        delta_quad = np.sqrt(np.maximum(r ** 2 - 1.0, EPS))
+        delta_quad = np.sqrt(np.maximum(np.abs(r ** 2 - 1.0), EPS))
         delta_eff = np.maximum(delta_quad - d, EPS)
         return 5.0 * np.log10(r_safe * delta_eff) + H
 
@@ -291,7 +304,9 @@ def prepare_training_data(subsample=None, seed=0):
     """Mirror the notebook's training filter so this tuner sees the same
     'decent orbit' population the production models train on."""
     print("Loading orbit databases (this can take a minute)...")
-    orb = utils.load_all_databases(apply_filters=True)
+    orb = utils.load_all_databases()
+    # filter out objects marked in either of the two named filter csvs
+    orb = orb[~orb["filtered_out"].astype(bool)]
     orb = utils.feature_engineering(orb)
 
     print("Merging cached extension_difficulty.csv...")
