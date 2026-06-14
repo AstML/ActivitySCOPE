@@ -50,15 +50,15 @@ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/w
 
 ## Usage
 
-The current implementation is provided in the Jupyter Notebook: `ActivitySCOPE_simplified_demo.ipynb`.
+Start with the Jupyter Notebook `Start Here - ActivitySCOPE simplified demo.ipynb`. A second notebook, `More Complicated Workbook - only provided for the curious right now.ipynb`, contains additional explorations and some used for the paper.
 
 1.  **Data Preparation:** The notebook works with the MPC (Minor Planet Center) orbit database. You may need to download the latest `MPCORB` extended JSON format or similar datasets as specified in the notebook cells.
 2.  **Run the Notebook:** Execute the cells in order. The notebook performs the following steps:
     -   Loads and filters the training data.
-    -   Trains the mislinkage classifier.
-    -   Trains the AutoGluon classification and regression models.
-    -   Generates predictions for the dataset.
-    -   Outputs lists of candidates (Cometary vs. Asteroidal orbits).
+    -   Trains the AutoGluon regression and classification models (the binary classifier references the regression model's out-of-fold predictions).
+    -   Generates predictions for every asteroid in the database.
+    -   Trains the extension-difficulty (mislinkage) classifier on those predictions.
+    -   Outputs ranked lists of candidates (Cometary vs. Asteroidal orbits).
 
 ## Results & Discoveries
 
