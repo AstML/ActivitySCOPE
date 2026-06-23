@@ -91,12 +91,13 @@ def get_mpcorb_extended_path(max_age_seconds=_MPCORB_CACHE_TTL_SECONDS):
 from autogluon.tabular.configs.hyperparameter_configs import get_hyperparameter_config
 import copy
 
-def _get_hyperparameters_excluding_catboost():
-    """Fetches the default AutoGluon hyperparameters and removes CatBoost."""
+def _get_hyperparameters_lgbm_xgb_only():
+    """Fetches the default AutoGluon hyperparameters and keeps only the two
+    gradient-boosted tree algorithms used throughout ActivitySCOPE: LightGBM
+    ('GBM') and XGBoost ('XGB'). All other default models (CatBoost, neural
+    networks, random forest, extra trees, KNN, etc.) are dropped."""
     hp = copy.deepcopy(get_hyperparameter_config('default'))
-    if 'CAT' in hp:
-        del hp['CAT']
-    return hp
+    return {k: hp[k] for k in ('GBM', 'XGB') if k in hp}
 
 # Hyperparameters for binary classification models
 HYPERPARAMETERS_BINARY = {
@@ -120,7 +121,7 @@ HYPERPARAMETERS_POISSON = {
 }
 
 # Hyperparameters for Quantile regression models
-HYPERPARAMETERS_QUANTILE = _get_hyperparameters_excluding_catboost()
+HYPERPARAMETERS_QUANTILE = _get_hyperparameters_lgbm_xgb_only()
 
 # Custom Poisson scorer for regression model evaluation
 POISSON_SCORER = make_scorer(
@@ -1554,9 +1555,9 @@ def load_all_databases():
     # else fall back to the dimmest (max) across available databases.
     # This must happen here, before feature_engineering is called, so that all
     # visibility features (vis_typ, vis_q, etc.) are computed using the combined H.
-    # Using orb["H"] (post-corrections) rather than H_MPC so that known photometry
-    # fixes are incorporated before combination.
-    print("Applying robust H (median if 3 values, else max (dimmest) across MPC/AstDyS/JPL, after corrections)...")
+    # At this point orb["H"] is still the raw MPC value (== H_MPC); manual photometry
+    # fixes are applied just below, after this cross-database combination.
+    print("Applying robust H (median if 3 values, else max (dimmest) across MPC/AstDyS/JPL; corrections applied next)...")
     h_cols = orb[["H", "H_astdys", "H_jpl"]]
     has_3 = h_cols.notna().sum(axis=1) == 3
     orb["H"] = np.where(has_3, h_cols.median(axis=1), h_cols.max(axis=1))
@@ -1666,6 +1667,9 @@ def train_extension_difficulty_classifier(orb_pred, final, orb, filter_csv="filt
         poss_misl_or_unc_ge4nights["extension_difficulty"] >= 0.01
     ]
 
+    # Objects with U = 9
+    poss_unc_U = poss_misl_or_unc_1opp[poss_misl_or_unc_1opp["U"] == 9]
+
     # high mag residuals likely
     poss_misl_or_unc_1opp_high_magresids = use_to_train_misl[
         (use_to_train_misl["v_mag_gap"] > 3)
@@ -1712,7 +1716,8 @@ def train_extension_difficulty_classifier(orb_pred, final, orb, filter_csv="filt
         _weighted(poss_misl_or_unc_named),
         _weighted(poss_multi_opp_mislinkages_named),
         _weighted(poss_misl_or_unc_1opp_high_magresids),
-        _weighted(poss_misl_or_unc_lt5day_arc_23opp, default_weight=5)
+        _weighted(poss_misl_or_unc_lt5day_arc_23opp, default_weight=5),
+        _weighted(poss_unc_U, frac=0.4)
     ])
 
     # Remove duplicates, keeping the highest-weight copy of each object
@@ -1744,15 +1749,18 @@ def train_extension_difficulty_classifier(orb_pred, final, orb, filter_csv="filt
     # =========================================================================
     
     likely_okay = use_to_train_misl[
-        (use_to_train_misl["prob"] < 0.7) & 
+        (use_to_train_misl["prob"] < 0.6) & 
         (use_to_train_misl["Num_opps"] < 3)
     ]
     likely_okay_heavier = likely_okay[
         (likely_okay["nights_total"] >= 4) | 
-        ((likely_okay["nights_total"] == 3) & (likely_okay["Arc_length"] < 22))
+        ((likely_okay["nights_total"] == 3) & (likely_okay["Arc_length"].between(11,22)))
     ]
     likely_okay_gt3_opps = use_to_train_misl[use_to_train_misl["Num_opps"] >= 3]
-    likely_okay_4night = likely_okay[likely_okay["nights_total"] == 4]
+    likely_okay_4night_withU = likely_okay[
+        (likely_okay["nights_total"] == 4)
+        &(likely_okay["U"]<9)
+        ]
     likely_okay_gt5_nights_single_opp = likely_okay[
         (likely_okay["nights_total"] >= 5) & 
         (likely_okay["Num_opps"] == 1)
@@ -1783,11 +1791,11 @@ def train_extension_difficulty_classifier(orb_pred, final, orb, filter_csv="filt
     # the prior per-list subsampling)
     likely_okay = pd.concat([
         _weighted(likely_okay_gt5_nights_single_opp, 5000),
-        _weighted(likely_okay, 6000),
+        _weighted(likely_okay, 5000),
         _weighted(likely_okay_heavier, 7000),
         _weighted(likely_okay_gt3_opps, 2000),
         _weighted(likely_okay_gt4_opps_short_init_arc, 500),
-        _weighted(likely_okay_4night, 4000),
+        _weighted(likely_okay_4night_withU, 8000),
         _weighted(likely_okay_3opp, 500),
         _weighted(likely_okay_lowresids),
         _weighted(likely_okay_2_nights_second_opp, 2000),

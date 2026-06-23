@@ -71,3 +71,26 @@ ActivitySCOPE has successfully identified numerous active objects, including:
 The model outputs a probability $P(N_{\text{opp}} \ge 4)$.
 -   **Single-Opposition Objects:** High probability ($>0.999$) suggests the object *should* have been seen more often. If it hasn't, it is a candidate for having been active (bright) during discovery and faint (inactive) otherwise.
 -   **False Positives:** Be aware of false linkages, photometry errors, and poorly defined orbits. A vetting protocol (checking residuals, ITF search, archival search) is recommended for all flagged candidates.
+
+## License
+
+This software is released under the [MIT License](LICENSE). Copyright (c) 2026 Peter VanWylen.
+
+The MIT License covers the original code in this repository. Several bundled
+data files originate wholly or partly from third-party sources and remain subject
+to those sources' own terms of use and acknowledgment requirements:
+
+-   `comet_orbits/allcometels.json` — comet orbital elements from the Minor
+    Planet Center (MPC).
+-   `astrometry_counter/astrometry_counts.json` — derived from MPC astrometry
+    (observation counts computed from MPC80-format observations).
+-   `comet_orbits/comet_els_fo.txt` — orbit solutions computed with
+    [find_orb](https://www.projectpluto.com/find_orb.htm) (B. Gray, Project Pluto)
+    from MPC astrometry.
+
+In addition, the code downloads the MPC orbit database (MPCORB), the AstDyS
+catalogs, and the JPL small-body elements at runtime; these are referenced rather
+than redistributed here. Please cite and acknowledge the MPC, AstDyS, JPL, and
+find_orb as appropriate when using this data. The remaining `.csv`/`.json` files
+(filter lists, overrides, and known-object lists) are original derived products
+of this project.
