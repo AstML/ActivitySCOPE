@@ -18,29 +18,31 @@ from autogluon.tabular import TabularPredictor
 import activityscope_utils as utils
 
 
-SIMPLE_FEATURES = ["vis_orbit_mag_multi", "spatial_discoverability_fraction", "Node"]
+SIMPLE_FEATURES = ["n_detectable", "H", "i"]
 LABEL_COL = "Num_opps_minus_one"
 
 FEATURE_LABELS_LATEX = {
-    "vis_orbit_mag_multi": r"vis\_orbit\_mag\_multi",
-    "spatial_discoverability_fraction": r"spatial\_discoverability\_fraction",
-    "Node": r"$\Omega$",
+    "n_detectable": r"n\_detectable",
+    "H": r"$H_V$ (mag)",
+    "i": r"$i$ (deg)",
 }
 
 FEATURE_LABELS_PLAIN = {
-    "vis_orbit_mag_multi": "vis_orbit_mag_multi",
-    "spatial_discoverability_fraction": "spatial_discoverability_fraction",
-    "Node": r"$\Omega$",
+    "n_detectable": "n_detectable",
+    "H": "H_V (mag)",
+    "i": "i (deg)",
 }
 
 FEATURE_XLIMS = {
-    "vis_orbit_mag_multi": (17, 30.5),
-    "Node": (0, 360),
+    "n_detectable": (0, 40),
+    "H": (10, 30),  # Example range, adjust as needed
+    "i": (0, 60),
 }
 
 FEATURE_XTICKS = {
-    "vis_orbit_mag_multi": [20, 25, 30],
-    "Node": [0, 90, 180, 270, 360],
+    "n_detectable": [0, 10, 20, 30, 40],
+    "H": [10, 15, 20, 25, 30],  # Example ticks, adjust as needed
+    "i": [0, 15, 30, 45, 60],
 }
 
 

@@ -4,7 +4,7 @@ Everything in the table comes from the model DataFrame (``final`` / ``cometmerge
 *except* the free-text per-object note, the confirmed-active asterisk, and the
 cometary/asteroidal grouping.  Those three live in ``table_notes.csv``:
 
-    designation , group , confirmed , note
+    designation , group , confirmed , marker , note
 
   * ``designation`` -- plain (un-subscripted) object name.  It is both the join key
     against the DataFrame's ``Object`` column and the displayed name.
@@ -17,6 +17,7 @@ cometary/asteroidal grouping.  Those three live in ``table_notes.csv``:
     their section.  Comet-file objects have NA ``Num_opps`` and therefore land in
     the single-opposition section unless you supply ``Num_opps`` for them.
   * ``confirmed``   -- ``1`` appends ``$^{\\ast}$`` (confirmed active), ``0`` does not.
+    * ``marker``      -- optional raw LaTeX marker appended after the activity asterisk.
   * ``note``        -- raw LaTeX placed verbatim in the final column (``\\notecell{...}``,
     ``\\citet{}``, ``\\tabnote{}`` and bare text are all preserved as-is).
 
@@ -24,7 +25,7 @@ Usage from the notebook::
 
     import paper_table, importlib; importlib.reload(paper_table)
     combined = paper_table.combine_sources(for_paper, cometmerge)   # build the data
-    latex = paper_table.build_table(combined, "table_notes.csv")
+    latex = paper_table.build_table(combined, "table_notes.csv", old_order=True)
     print(latex)                                                    # paste into main.tex
 
 Numbers reproduce the existing column meanings:
@@ -160,6 +161,7 @@ def load_notes(notes_csv):
         rows = list(csv.DictReader(f))
     for r in rows:
         r["confirmed"] = str(r.get("confirmed", "")).strip() in ("1", "True", "true")
+        r["marker"] = r.get("marker", "").strip()
         r["nopp_dagger"] = str(r.get("nopp_dagger", "")).strip() in ("1", "True", "true")
         r["group"] = r.get("group", "").strip().lower()
         r["designation"] = r["designation"].strip()
@@ -180,10 +182,10 @@ def _lookup(df_by_object, designation):
 _HEADER = r"""\begin{longrotatetable}
 
 \begin{longtable}{lrrrrrrrrrrrl}
-\caption{\activityscope\ candidates, recoveries, and false positives. Confirmed active objects are marked with an asterisk.}
+\caption{\activityscope\ discoveries, independent recoveries, and candidates. Objects with observed activity are marked with an asterisk.}
 \label{tab:activityscope_results}\\
 \toprule
-Object & $q$ {\footnotesize (AU)} & $a$ {\footnotesize (AU)} & $e$ & $i~(^\circ)$ &
+Object & $q$ {\footnotesize (au)} & $a$ {\footnotesize (au)} & $e$ & $i~(^\circ)$ &
 $T_J$\tabnote{Tisserand parameter with respect to Jupiter.} &
 $H_V$\tabnote{Absolute magnitude in the $V$ band, assuming an inert object.} &
 $N_{\rm opp}$\tabnote{Number of oppositions on which the object has been observed.} &
@@ -195,9 +197,9 @@ Note \\
 \midrule
 \endfirsthead
 
-\caption[]{\activityscope\ candidates, recoveries, and false positives. Confirmed active objects are marked with an asterisk. (continued)}\\
+\caption[]{\activityscope\ discoveries, independent recoveries, and candidates. Objects with observed activity are marked with an asterisk. \mbox{(continued)}}\\
 \toprule
-Object & $q$ {\footnotesize (AU)} & $a$ {\footnotesize (AU)} & $e$ & $i~(^\circ)$ &
+Object & $q$ {\footnotesize (au)} & $a$ {\footnotesize (au)} & $e$ & $i~(^\circ)$ &
 $T_J$\textsuperscript{a} & $H_V$\textsuperscript{b} & $N_{\rm opp}$\textsuperscript{c} &
 {\footnotesize $E[N_{\rm opp}]$}\textsuperscript{d} & {\footnotesize $P(N_{\rm opp}\ge4)$}\textsuperscript{e} &
 $\Delta Q$\textsuperscript{f} & $S_{\rm EV}$\textsuperscript{g} & Note \\
@@ -212,8 +214,11 @@ $\Delta Q$\textsuperscript{f} & $S_{\rm EV}$\textsuperscript{g} & Note \\
 """
 
 _FOOTER = r"""\bottomrule
-\multicolumn{13}{l}{\footnotesize $^{\ast}$\,Confirmed active object.}\\
+\multicolumn{13}{l}{\footnotesize Unless otherwise noted, all orbital elements are osculating elements from the epoch provided in \texttt{MPCORB}.}\\
+\multicolumn{13}{l}{\footnotesize $^{\ast}$\,Observationally confirmed active object.}\\
+\multicolumn{13}{l}{\footnotesize $^{\Vert}$\,Activity supported by combination of observational and photometric evidence.}\\
 \multicolumn{13}{l}{\footnotesize $^{\dagger}$\,Single-opposition at the time of flagging; tabulated $N_{\rm opp}$, $\Delta Q$, and $S_{\rm EV}$ are the values the model assigns to an otherwise-identical single-opposition object.}\\
+\multicolumn{13}{l}{\footnotesize $^{\ddag}$\,Indicates that provided orbital information is from osculating elements taken from the discovery epoch instead of latest available epoch.}\\
 \printtabnotes
 
 \end{longtable}
@@ -225,8 +230,8 @@ SECTION_MULTI_COMET = "Cometary orbits (multiple oppositions when flagged)"
 SECTION_SINGLE_COMET = "Cometary orbits (single opposition when flagged)"
 SECTION_ASTEROID = "Asteroidal orbits"
 
-_SORT_SEV_ASC = r"sorted by $S_{\rm EV}$, ascending, in bold"
-_SORT_PROB_DESC = r"sorted by $P(N_{\rm opp}\ge4)$, descending, in bold"
+_SORT_SEV_ASC = r"sorted by $S_{\rm EV}$, ascending"
+_SORT_PROB_DESC = r"sorted by $P(N_{\rm opp}\ge4)$, descending"
 
 
 _DAGGER = r"$^{\dagger}$"
@@ -273,16 +278,14 @@ def _key_desc(v):
     return (na, -v if not na else 0.0)
 
 
-def _render_row(designation, confirmed, note, data, dagger=False, sort_col=None):
-    obj = format_designation(designation, confirmed)
+def _render_row(designation, confirmed, marker, note, data, dagger=False):
+    obj = format_designation(designation, confirmed) + marker
     if data is None:
         cells = ["" for _ in DATA_COLUMNS]
     else:
         cells = []
         for col in DATA_COLUMNS:
             val = FORMATTERS[col](data.get(col))
-            if col == sort_col and val.strip():
-                val = f"\\textbf{{{val}}}"
             cells.append(val)
             
     if dagger:
@@ -296,7 +299,7 @@ def _render_row(designation, confirmed, note, data, dagger=False, sort_col=None)
     )
 
 
-def build_table(df, notes_csv, warn=True, multi_opp_threshold=1):
+def build_table(df, notes_csv, warn=True, multi_opp_threshold=1, old_order=True):
     """Build the full ``longrotatetable`` LaTeX block.
 
     ``df`` is the combined DataFrame (see :func:`combine_sources`) with an
@@ -305,7 +308,11 @@ def build_table(df, notes_csv, warn=True, multi_opp_threshold=1):
     The cometary group is split into multi-opposition (``Num_opps >
     multi_opp_threshold``) and single-opposition sections.  Sorting:
     multi-opp cometary by ``S_EV`` ascending; single-opp cometary and asteroidal
-    by ``prob`` descending.  Missing/NA sort keys go to the bottom of the section.
+    by ``prob`` descending. Missing/NA sort keys go to the bottom of the section.
+
+    With ``old_order=True`` (the default), preserve the notes CSV order within each
+    section so the output retains the established paper-table order. Set
+    ``old_order=False`` to apply the sort orders described in the section labels.
     """
     df = _ensure_derived(df)
     df_by_object = df.drop_duplicates(subset="Object").set_index("Object")
@@ -335,19 +342,20 @@ def build_table(df, notes_csv, warn=True, multi_opp_threshold=1):
                       "treating as asteroidal")
             asteroid.append(entry)
 
-    multi.sort(key=lambda e: _key_asc(_num(e[1], "S_EV")))
-    single.sort(key=lambda e: _key_desc(_num(e[1], "prob")))
-    asteroid.sort(key=lambda e: _key_desc(_num(e[1], "prob")))
+    if not old_order:
+        multi.sort(key=lambda e: _key_asc(_num(e[1], "S_EV")))
+        single.sort(key=lambda e: _key_desc(_num(e[1], "prob")))
+        asteroid.sort(key=lambda e: _key_desc(_num(e[1], "prob")))
 
-    # (label, entries, sort caption, force a page break before this section, sort column)
+    # (label, entries, sort caption, force a page break before this section)
     sections = [
-        (SECTION_MULTI_COMET, multi, _SORT_SEV_ASC, False, "S_EV"),
-        (SECTION_SINGLE_COMET, single, _SORT_PROB_DESC, False, "prob"),
-        (SECTION_ASTEROID, asteroid, _SORT_PROB_DESC, True, "prob"),  # hard-coded page break
+        (SECTION_MULTI_COMET, multi, _SORT_SEV_ASC, False),
+        (SECTION_SINGLE_COMET, single, _SORT_PROB_DESC, False),
+        (SECTION_ASTEROID, asteroid, _SORT_PROB_DESC, True),  # hard-coded page break
     ]
 
     parts = [_HEADER]
-    for label, entries, sortcap, newpage, sort_col in sections:
+    for label, entries, sortcap, newpage in sections:
         if not entries:
             continue
         if newpage:
@@ -357,8 +365,8 @@ def build_table(df, notes_csv, warn=True, multi_opp_threshold=1):
         parts.append(r"\midrule")
         parts.append("")
         for r, data in entries:
-            parts.append(_render_row(r["designation"], r["confirmed"], r["note"], data,
-                                     dagger=r["nopp_dagger"], sort_col=sort_col))
+            parts.append(_render_row(r["designation"], r["confirmed"], r["marker"], r["note"], data,
+                                     dagger=r["nopp_dagger"]))
             parts.append("")
         parts.append(r"\midrule")
 

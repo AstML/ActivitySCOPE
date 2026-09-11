@@ -512,13 +512,13 @@ def feature_engineering(orb, extra_features=False):
         Also compute the exploratory / superseded feature families that the 12-feature model
         does not use -- the orbit-averaged block (vis_orbit_mag_multi,
         spatial_discoverability_fraction, dec_flux_weighted, vis_orbit_flux_*, ...), the
-        last-three-perihelia reconstruction, the 17-apparition vis_opp_* solver,
-        n_detect_windows, and the survey-era block (E_50yr, E_var, E_full_w03, first_det_year,
-        gal_lat_frac_low, ...) apart from its one surviving column, days_since_last_opp.
-        Together they are the great majority of this function's runtime (n_detect_windows
-        alone is most of it), so they are off by default; see
-        _add_orbit_averaged_features, _add_exploratory_features, add_detect_window_features
-        and add_survey_era_features. Turning this on reproduces their values unchanged.
+        last-three-perihelia reconstruction, the 17-apparition vis_opp_* solver, and the
+        survey-era block (E_50yr, E_var, E_full_w03, first_det_year, gal_lat_frac_low, ...)
+        apart from its one surviving column, days_since_last_opp. Together they are the
+        majority of this function's runtime, so they are off by default; see
+        _add_orbit_averaged_features, _add_exploratory_features and add_survey_era_features.
+        Turning this on reproduces their values unchanged. n_detect_windows (the ramp-threshold
+        version, add_detect_window_features) is computed on both paths.
     
     Returns
     -------
@@ -774,13 +774,17 @@ def feature_engineering(orb, extra_features=False):
         # was superseded by the detectable-apparition features below; only days_since_last_opp
         # survived into the model, and add_last_opposition_feature computes that alone.
         orb = add_survey_era_features(orb, G=G, t_ref=t_ref)
-        # n_detect_windows walks the whole 20-yr lookback on a 10-day grid rather than scoring
-        # solved apparitions, which makes it several times more expensive than everything else in
-        # this function put together. It is not in the model feature list either.
-        orb = add_detect_window_features(orb)
     else:
         orb = add_last_opposition_feature(orb, G=G, t_ref=t_ref)
     orb = add_detectable_apparition_features(orb, G=G, t_ref=t_ref)
+    # n_detect_windows walks the true geometry through the 20-yr lookback on a 10-day grid rather
+    # than scoring solved apparitions, so it is the one column that sees solar elongation and
+    # close approaches away from opposition. That is what the apparition counts miss for
+    # near-Earth objects: on q < 1.5 objects it is worth -6.8% Poisson deviance / -2.8% log-loss
+    # on top of the 12-feature set (modeling/neo_sfs/REPORT.md, 2026-09-14), against -0.3% on the
+    # main-belt-dominated full frame. It uses the same depth ramp as n_detectable, so it needs no
+    # survey calibration. Its row chunks run on the apparition thread pool.
+    orb = add_detect_window_features(orb)
 
     return orb
 
@@ -1737,8 +1741,9 @@ def _add_exploratory_features(orb):
 #   days_since_last_detectable_E50yr  days from the most recent apparition with detection probability > 0.5 to the reference date
 #   year_brightest_app   calendar year of the brightest apparition in the window
 #   years_since_brightest_app  the same as an elapsed duration; this is the column the model uses
-#   n_detect_windows     number of separate detectable intervals in the window, from a 10-day time grid
-#                        (add_detect_window_features below; modeling/feature_eng2 final round: -0.28% deviance)
+#   n_detect_windows     number of separate detectable intervals in the 20-yr window, from a 10-day time grid
+#                        (add_detect_window_features below; modeling/feature_eng2 final round: -0.28% deviance;
+#                        since 2026-09-14 thresholded on the _survey_limit ramp rather than the era table)
 #
 # The last two were added in the second feature-engineering round (modeling/feature_eng2/REPORT.md):
 # with orbital_period_sync they cut Poisson deviance by 1.5% on 1.17M held-out rows.
@@ -2235,11 +2240,12 @@ def _magnitude_detection(year, V, window=50):
 def _threshold_magnitude(year, window=20):
     """A single limiting magnitude for the year, for the one feature that needs a hard cut.
 
-    n_detect_windows counts runs of "detectable" samples on a time grid, which
-    is a threshold question, not a probability one. With the measured
-    calibration the threshold is V_50(t) -- the magnitude at which the survey
-    system of that year detected half of what it could -- rather than the
-    hand-set era value.
+    With the measured calibration the threshold is V_50(t) -- the magnitude at
+    which the survey system of that year detected half of what it could --
+    rather than the hand-set era value. n_detect_windows used this until
+    2026-09-14; it now thresholds on the _survey_limit ramp (modeling/neo_sfs:
+    the ramp keeps the NEO gain, -6.8% vs -7.1% deviance on q < 1.5). Kept for
+    the survey-efficiency study.
     """
     tab = _efficiency_table()
     if tab is None:
@@ -2512,9 +2518,12 @@ def _detectable_from_apparitions(G, t_ref, h_offset=0.0):
 # orbit that, for a short-arc object, is often barely constrained: a small error in a becomes
 # a large error in orbital phase over the 50-year lookback, and phase decides which apparitions
 # are scored against the modern survey depth. The notebook's pessimistic second pass therefore
-# re-scores the strongest single-opposition candidates at the node that MINIMISES n_detectable
-# over a few Gauss-Hermite nodes along the line of variation of the published MPC orbit
-# covariance, each at the catalogued H and at H + 0.3 (fainter, hence less detectable).
+# re-scores the strongest single-opposition candidates at the orbit that MINIMISES n_detectable
+# over a fixed, deterministic set of orbits compatible with the published MPC covariance: the
+# nominal solution plus +/- 3 sigma along each of the six principal axes, each at the catalogued
+# H and at H + 0.3 (fainter, hence less detectable). Every excursion sits at the same Mahalanobis
+# distance from the nominal orbit, so the set samples one fixed-probability surface of the
+# uncertainty ellipsoid rather than privileging any single direction.
 #
 # The covariances come from public.mpc_orbits on the SBN PostgreSQL mirror. The full
 # covariance lives in mpc_orb_jsonb->'COM'->'covariance' as the upper triangle of a 10x10
@@ -2530,11 +2539,19 @@ _SBN_COM_NAMES = ["q", "e", "i", "node", "argperi", "peri_time"]
 _GAUSS_K_DEG = 0.9856076686          # mean motion in deg/day at a = 1 AU
 _MJD_TO_JD = 2400000.5
 _PESSIMISTIC_H_OFFSET = 0.3          # magnitudes fainter for the pessimistic arm
-_PESSIMISTIC_LOV_NODES = 5           # a short-arc covariance is ~99.9% rank one
+_PESSIMISTIC_N_SIGMA = 3.0           # excursion along each principal axis, in sigmas
+_PESSIMISTIC_N_ORBITS = 13           # the nominal orbit plus +/- n_sigma along each of six axes
+_PESSIMISTIC_N_CLONES = 100          # clones for the alternative full-covariance sampling
+_PESSIMISTIC_SEED = 20260912         # fixes those clones: the pass is reproducible run to run
 _PESSIMISTIC_T_REF = 2461200.5       # fixed reference epoch so the bound is reproducible
 _PESSIMISTIC_CHUNK_ROWS = 200_000    # node-rows per apparition solve
 DETECTABLE_COLS = ("n_detectable", "n_detectable_var",
                    "years_since_first_detectable", "days_since_last_detectable")
+PESSIMISTIC_SCENARIO_COLS = (
+    "H", "a", "e", "i", "Node", "Peri",
+    "vis_q", "Perihelion_direction_x_e", "Perihelion_direction_y_e",
+    "days_since_last_opp",
+) + DETECTABLE_COLS
 
 
 def sbn_connect():
@@ -2604,10 +2621,10 @@ def sbn_fetch_covariances(designations, conn=None):
 def _com_to_keplerian(samples, epoch_mjd, h):
     """Cometary element samples (n, 6) -> the frame the apparition solver takes."""
     q, e, inc, node, argperi, tperi = samples.T
-    # Far out along the line of variation a node can leave the physical region -- q below
-    # zero, or e at or above one -- for an orbit whose sigma_q is a sizeable fraction of q.
-    # Clamp to something still an orbit; those nodes carry little weight and non-finite
-    # apparitions are dropped downstream.
+    # Far out along an axis a sample can leave the physical region -- q below zero, or e at
+    # or above one -- for an orbit whose sigma_q is a sizeable fraction of q. Clamp to
+    # something still an orbit so the apparition solver never sees a degenerate orbit; the
+    # caller masks these rows out of the bound (see _axis_orbits).
     e = np.clip(e, 0.0, 0.99)
     q = np.maximum(q, 0.01)
     a = q / np.maximum(1.0 - e, 1e-6)
@@ -2618,101 +2635,199 @@ def _com_to_keplerian(samples, epoch_mjd, h):
                              H=np.full(len(a), h)))
 
 
-def _lov_nodes(entry, n_nodes=_PESSIMISTIC_LOV_NODES):
-    """Orbits at Gauss-Hermite nodes along the line of variation of one covariance record.
+def _axis_orbits(entry, n_sigma=_PESSIMISTIC_N_SIGMA):
+    """The nominal orbit plus +/- n_sigma along each principal axis of one covariance record.
 
-    A short-arc covariance is dominated by one direction (for one-opposition orbits the leading
-    eigenvector carries a median 99.9% of the variance), so a few quadrature nodes along it
-    reproduce a full 6-D Monte Carlo at a fraction of the cost. Returns (frame, weights) with
-    the weights summing to one; the middle node is the nominal orbit.
+    Returns (frame, valid) with _PESSIMISTIC_N_ORBITS = 1 + 2*6 rows, the nominal orbit first.
+    Scaling each unit eigenvector by n_sigma * sqrt(its eigenvalue) puts every excursion at the
+    same Mahalanobis distance n_sigma from the nominal orbit, so the set samples one
+    fixed-probability surface of the uncertainty ellipsoid and needs no claim about which
+    direction dominates. `valid` marks the rows that are still a bound, physical orbit; the rest
+    are clamped into the physical region by _com_to_keplerian so the apparition solver never sees
+    a degenerate orbit, and are masked out of the bound by the caller.
     """
     C = 0.5 * (entry["cov"] + entry["cov"].T)
     w_eig, V = np.linalg.eigh(C)
-    k = int(np.argmax(w_eig))
-    lov = V[:, k] * np.sqrt(max(w_eig[k], 0.0))          # the 1-sigma step along the LOV
-    x, wq = np.polynomial.hermite_e.hermegauss(n_nodes)  # nodes in units of sigma
-    wq = wq / wq.sum()
-    draws = entry["values"][None, :] + x[:, None] * lov[None, :]
+    steps = V * np.sqrt(np.clip(w_eig, 0.0, None))       # column j: the 1-sigma step along axis j
+    offsets = np.vstack([np.zeros((1, 6)), n_sigma * steps.T, -n_sigma * steps.T])
+    draws = entry["values"][None, :] + offsets
+    valid = (draws[:, 0] > 0.0) & (draws[:, 1] >= 0.0) & (draws[:, 1] < 1.0)
     frame = _com_to_keplerian(draws, entry["epoch_mjd"], np.nan)
-    frame["H"] = np.full(n_nodes, entry["h"])
-    return frame, wq
+    frame["H"] = np.full(len(draws), entry["h"])
+    return frame, valid
 
 
-def _detectable_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
-    """The four detectable-apparition features at the frame's H and at H + h_offset, sharing one propagation."""
+def _clone_deviates(n_clones=_PESSIMISTIC_N_CLONES, seed=_PESSIMISTIC_SEED):
+    """n_clones standard normal deviates (n_clones, 6), fixed by `seed`.
+
+    Drawn in antithetic pairs (z, -z) so the set is exactly symmetric about the nominal orbit
+    and its sample mean is the nominal orbit exactly rather than to within Monte Carlo error.
+    One set is drawn per run and reused for every object, so differences between objects reflect
+    their covariances rather than sampling noise (common random numbers).
+    """
+    rng = np.random.default_rng(seed)
+    z = rng.standard_normal((n_clones // 2, 6))
+    z = np.vstack([z, -z])
+    if len(z) < n_clones:                                # odd n_clones: one unpaired draw
+        z = np.vstack([z, rng.standard_normal((1, 6))])
+    return z
+
+
+def _clone_orbits(entry, z):
+    """The nominal orbit plus one clone per row of `z`, drawn from the full covariance.
+
+    Returns (frame, valid) with 1 + len(z) rows, the nominal orbit first. The clones are
+    entry["values"] + z @ L.T with L L^T = the covariance, so they are a sample from the
+    published multivariate Gaussian rather than a structured excursion; L comes from the
+    eigendecomposition rather than a Cholesky factor because short-arc covariances are
+    near-singular and often numerically indefinite. `valid` is as in _axis_orbits.
+    """
+    C = 0.5 * (entry["cov"] + entry["cov"].T)
+    w_eig, V = np.linalg.eigh(C)
+    L = V * np.sqrt(np.clip(w_eig, 0.0, None))           # C = L L^T
+    draws = np.vstack([entry["values"][None, :], entry["values"][None, :] + z @ L.T])
+    valid = (draws[:, 0] > 0.0) & (draws[:, 1] >= 0.0) & (draws[:, 1] < 1.0)
+    frame = _com_to_keplerian(draws, entry["epoch_mjd"], np.nan)
+    frame["H"] = np.full(len(draws), entry["h"])
+    return frame, valid
+
+
+def _pessimistic_scenario_features(frame, G, t_ref, h_offset=0.0):
+    """Production model inputs for one clone/H scenario, reusing solved apparitions."""
+    scenario = frame.copy()
+    scenario["H"] += h_offset
+    eps_val = 1e-3
+    r_vis_q = scenario["a"] * (1.0 - scenario["e"])
+    delta_vis_q = np.maximum(r_vis_q - 1.0, eps_val)
+    scenario["vis_q"] = (
+        5.0 * np.log10(np.maximum(r_vis_q, eps_val) * delta_vis_q) + scenario["H"]
+    ).astype(float)
+
+    node_rad = np.radians(scenario["Node"])
+    peri_rad = np.radians(scenario["Peri"])
+    inc_rad = np.radians(scenario["i"])
+    scenario["Perihelion_direction_x_e"] = scenario["e"] * (
+        np.cos(node_rad) * np.cos(peri_rad)
+        - np.sin(node_rad) * np.sin(peri_rad) * np.cos(inc_rad)
+    )
+    scenario["Perihelion_direction_y_e"] = scenario["e"] * (
+        np.sin(node_rad) * np.cos(peri_rad)
+        + np.cos(node_rad) * np.sin(peri_rad) * np.cos(inc_rad)
+    )
+    scenario["days_since_last_opp"] = _days_since_last_opp(G, t_ref)
+    for column, values in zip(DETECTABLE_COLS, _detectable_from_apparitions(G, t_ref, h_offset)):
+        scenario[column] = values
+    return scenario.loc[:, PESSIMISTIC_SCENARIO_COLS].to_numpy(dtype=float)
+
+
+def _pessimistic_scenarios_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
+    """Production model inputs at the frame's H and at H + h_offset, sharing one propagation."""
     set_reference_epoch(t_ref)
     G = _solve_apparitions(frame, n_opp=_DET_N_APPARITIONS, t_ref=t_ref)
-    return [np.column_stack(_detectable_from_apparitions(G, t_ref, h_offset=dh))
+    return [_pessimistic_scenario_features(frame, G, t_ref, h_offset=dh)
             for dh in (0.0, h_offset)]
 
 
-def pessimistic_detectable_bounds(entries, n_nodes=_PESSIMISTIC_LOV_NODES,
-                                  h_offset=_PESSIMISTIC_H_OFFSET, verbose=False):
+def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
+                                  h_offset=_PESSIMISTIC_H_OFFSET, n_clones=None,
+                                  seed=_PESSIMISTIC_SEED, verbose=False,
+                                  return_scenarios=False):
     """Lower bound on n_detectable over the orbit covariance and a fainter H, per object.
 
     `entries` is the {designation: record} mapping from sbn_fetch_covariances. Each object is
-    scored at n_nodes Gauss-Hermite nodes along its line of variation, at the catalogued H and
-    at H + h_offset (2 * n_nodes evaluations, n_nodes propagations, since H enters the apparent
-    magnitude as an additive constant). Returns a DataFrame with one row per object:
-    Principal_desig, n_detectable_nominal (nominal orbit, catalogued H), n_detectable_lower and
+    scored at a set of orbits compatible with its covariance, at the catalogued H and at
+    H + h_offset (two evaluations per orbit but only one propagation, since H enters the
+    apparent magnitude as an additive constant). Two ways to build that set:
+
+      n_clones=None (default)  the _PESSIMISTIC_N_ORBITS orbits of _axis_orbits: the nominal
+                               solution plus +/- n_sigma along each of the six principal axes.
+      n_clones=N               the nominal solution plus N clones drawn from the full covariance
+                               (_clone_orbits), fixed by `seed` so the pass is reproducible.
+
+    Note that a minimum over N random clones is not a fixed quantity the way the axis set is:
+    it drifts downward as N grows, so bounds taken at different n_clones are not comparable.
+
+    Returns a DataFrame with one row per object: Principal_desig,
+    n_detectable_nominal (nominal orbit, catalogued H), n_detectable_lower and
     n_detectable_upper (min and max over the scenarios), n_detectable_lower_H (the pessimistic-H
-    arm alone), and the four DETECTABLE_COLS of the minimising scenario as <col>_lower, so the
-    substituted row is a self-consistent orbit rather than a mix. Objects without a finite H
-    are skipped; an empty DataFrame is returned when nothing can be scored.
+    arm alone), and every PESSIMISTIC_SCENARIO_COLS feature of the minimising scenario as
+    <col>_lower. This includes all eight engineered model features and the clone's raw orbital
+    values, so a re-scored row is self-consistent rather than a mix. When `return_scenarios` is
+    true, also returns a long DataFrame containing every valid scenario with these columns
+    suffixed `_scenario`, suitable for evaluating extrema of model predictions. Objects without a
+    finite H are skipped; an empty DataFrame is returned when nothing can be scored.
     """
-    desigs, frames = [], []
+    z = None if n_clones is None else _clone_deviates(n_clones, seed)
+    desigs, frames, valids = [], [], []
     for desig, e in entries.items():
         if not np.isfinite(e["h"]):
             continue
-        f, _w = _lov_nodes(e, n_nodes)
+        f, v = _axis_orbits(e, n_sigma) if z is None else _clone_orbits(e, z)
         frames.append(f)
+        valids.append(v)
         desigs.append(desig)
     if not frames:
         return pd.DataFrame()
+    n_orbits = len(valids[0])           # uniform by construction; the reshape below assumes it
     big = pd.concat(frames, ignore_index=True)
     t0 = time.time()
-    F = np.empty((len(big), 2, len(DETECTABLE_COLS)))
+    F = np.empty((len(big), 2, len(PESSIMISTIC_SCENARIO_COLS)))
     for lo in range(0, len(big), _PESSIMISTIC_CHUNK_ROWS):
         hi = min(lo + _PESSIMISTIC_CHUNK_ROWS, len(big))
-        a, b = _detectable_both(big.iloc[lo:hi], h_offset)
+        a, b = _pessimistic_scenarios_both(big.iloc[lo:hi], h_offset)
         F[lo:hi, 0], F[lo:hi, 1] = a, b
         if verbose:
             print("  solved %d/%d node-rows (%.0fs)" % (hi, len(big), time.time() - t0),
                   flush=True)
-    # (object, scenario, column) with the scenarios ordered [nodes at H, nodes at H + offset]
-    F = F.reshape(len(desigs), n_nodes, 2, len(DETECTABLE_COLS)).transpose(0, 2, 1, 3)
-    F = F.reshape(len(desigs), 2 * n_nodes, len(DETECTABLE_COLS))
-    n_detectable = F[:, :, 0]
+    # (object, scenario, column) with the scenarios ordered [orbits at H, orbits at H + offset]
+    F = F.reshape(len(desigs), n_orbits, 2, len(PESSIMISTIC_SCENARIO_COLS)).transpose(0, 2, 1, 3)
+    F = F.reshape(len(desigs), 2 * n_orbits, len(PESSIMISTIC_SCENARIO_COLS))
+    # Axis excursions that left the physical region were clamped only to keep the solver happy;
+    # drop them here so they cannot set the bound. The nominal orbit is always retained.
+    F[~np.tile(np.asarray(valids), (1, 2))] = np.nan
+    n_detectable = F[:, :, PESSIMISTIC_SCENARIO_COLS.index("n_detectable")]
     k_min = np.argmin(np.where(np.isfinite(n_detectable), n_detectable, np.inf), axis=1)
-    mid = n_nodes // 2                      # the central Gauss-Hermite node, at the catalogued H
     out = dict(Principal_desig=desigs,
-               n_detectable_nominal=n_detectable[:, mid],
+               n_detectable_nominal=n_detectable[:, 0],      # the nominal orbit, catalogued H
                n_detectable_lower=np.nanmin(n_detectable, axis=1),
                n_detectable_upper=np.nanmax(n_detectable, axis=1),
-               n_detectable_lower_H=np.nanmin(n_detectable[:, n_nodes:], axis=1),
-               n_evals=2 * n_nodes, n_solves=n_nodes)
+               n_detectable_lower_H=np.nanmin(n_detectable[:, n_orbits:], axis=1),
+               n_evals=2 * n_orbits, n_solves=n_orbits)
     rows = np.arange(len(desigs))
-    for j, c in enumerate(DETECTABLE_COLS):
+    for j, c in enumerate(PESSIMISTIC_SCENARIO_COLS):
         out[c + "_lower"] = F[rows, k_min, j]
-    return pd.DataFrame(out)
+    bounds = pd.DataFrame(out)
+    if not return_scenarios:
+        return bounds
+
+    scenario_count = 2 * n_orbits
+    scenario_values = F.reshape(-1, len(PESSIMISTIC_SCENARIO_COLS))
+    scenarios = pd.DataFrame(
+        scenario_values,
+        columns=[c + "_scenario" for c in PESSIMISTIC_SCENARIO_COLS],
+    )
+    scenarios.insert(0, "scenario", np.tile(np.arange(scenario_count), len(desigs)))
+    scenarios.insert(0, "Principal_desig", np.repeat(desigs, scenario_count))
+    return bounds, scenarios.loc[np.isfinite(scenarios["n_detectable_scenario"])].reset_index(drop=True)
 
 
 _GRID_STEP_DAYS = 10.0          # time-grid sampling for the detectability windows
 _GRID_MIN_ELONG_DEG = 60.0      # an object closer than this to the Sun is not observable, however bright
-_GRID_CHUNK = 20000
+_GRID_CHUNK = 4000              # rows per chunk; ~230 MB of temporaries each, several chunks in flight
 
 
 def add_detect_window_features(orb):
     """Adds n_detect_windows: the number of separate intervals within the 20-yr lookback during which the
-    object was brighter than the era limiting magnitude AND more than _GRID_MIN_ELONG_DEG from the Sun,
-    on a _GRID_STEP_DAYS time grid.
+    object was brighter than the survey limit of the day (_survey_limit, the 0.12 mag/yr ramp that
+    n_detectable uses) AND more than _GRID_MIN_ELONG_DEG from the Sun, on a _GRID_STEP_DAYS time grid.
 
     Unlike the apparition features, which score each solved apparition at a single instant, this walks
     the true geometry through the whole window, so it counts what was actually observable: an interior
     object's equal-longitude events next to the Sun do not count, and an apparition that stayed above the
     limit for only a few days counts the same as one that lasted months (duration itself did not add
     anything on held-out data; the count did). Same elements, Earth ephemeris and magnitude model as
-    _solve_apparitions. Processed in row chunks to bound memory (~1 GB per 20k rows)."""
+    _solve_apparitions. Processed in row chunks to bound memory, on the apparition thread pool
+    (_run_row_chunks); every row is independent, so the result is identical to a sequential loop."""
     needed = ("a", "e", "i", "Node", "Peri", "M", "Epoch", "H")
     if not all(c in orb.columns for c in needed):
         orb["n_detect_windows"] = np.nan
@@ -2737,8 +2852,8 @@ def add_detect_window_features(orb):
         r = 1.00014061 - 0.01670861 * np.cos(M) - 0.00013957 * np.cos(2.0 * M)
         return r * np.cos(lam), r * np.sin(lam)
 
-    for s0 in range(0, len(orb), _GRID_CHUNK):
-        sl = slice(s0, min(len(orb), s0 + _GRID_CHUNK))
+    def chunk(s0, e0):
+        sl = slice(s0, e0)
         B = lambda v: v[sl][:, None]
         t = t_ref - offsets
         MM = np.mod(B(M0) + B(n_mm) * (t - B(epoch)) + np.pi, 2.0 * np.pi) - np.pi
@@ -2760,9 +2875,11 @@ def add_detect_window_features(orb):
             re_ = np.sqrt(xe * xe + ye * ye)
             cos_elong = np.clip(-(xe * dx + ye * dy) / np.maximum(re_ * delta, 1e-12), -1.0, 1.0)
             year = 2000.0 + (t - 2451545.0) / 365.25
-            det = (V < _threshold_magnitude(year)) & (cos_elong < np.cos(np.radians(_GRID_MIN_ELONG_DEG)))
+            det = (V < _survey_limit(year)) & (cos_elong < np.cos(np.radians(_GRID_MIN_ELONG_DEG)))
         d = det.astype(np.int8)
         out[sl] = d[:, 0] + ((d[:, 1:] == 1) & (d[:, :-1] == 0)).sum(axis=1)   # number of runs of consecutive detectable samples
+
+    _run_row_chunks(chunk, len(orb), _GRID_CHUNK)
     orb["n_detect_windows"] = out.astype(float)
     return orb
 

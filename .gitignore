@@ -7,3 +7,5 @@ astrometry_counter/unpublished_astrometry.txt
 settings*
 .claude/
 .env
+main.tex
+multi_run_outputs/
