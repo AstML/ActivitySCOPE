@@ -23,14 +23,14 @@ LABEL_COL = "Num_opps_minus_one"
 
 FEATURE_LABELS_LATEX = {
     "n_detectable": r"n\_detectable",
-    "H": r"H",
-    "i": r"i",
+    "H": r"$H_V$ (mag)",
+    "i": r"$i$ (deg)",
 }
 
 FEATURE_LABELS_PLAIN = {
     "n_detectable": "n_detectable",
-    "H": "H",
-    "i": "i",
+    "H": "H_V (mag)",
+    "i": "i (deg)",
 }
 
 FEATURE_XLIMS = {
