@@ -2512,9 +2512,12 @@ def _detectable_from_apparitions(G, t_ref, h_offset=0.0):
 # orbit that, for a short-arc object, is often barely constrained: a small error in a becomes
 # a large error in orbital phase over the 50-year lookback, and phase decides which apparitions
 # are scored against the modern survey depth. The notebook's pessimistic second pass therefore
-# re-scores the strongest single-opposition candidates at the node that MINIMISES n_detectable
-# over a few Gauss-Hermite nodes along the line of variation of the published MPC orbit
-# covariance, each at the catalogued H and at H + 0.3 (fainter, hence less detectable).
+# re-scores the strongest single-opposition candidates at the orbit that MINIMISES n_detectable
+# over a fixed, deterministic set of orbits compatible with the published MPC covariance: the
+# nominal solution plus +/- 3 sigma along each of the six principal axes, each at the catalogued
+# H and at H + 0.3 (fainter, hence less detectable). Every excursion sits at the same Mahalanobis
+# distance from the nominal orbit, so the set samples one fixed-probability surface of the
+# uncertainty ellipsoid rather than privileging any single direction.
 #
 # The covariances come from public.mpc_orbits on the SBN PostgreSQL mirror. The full
 # covariance lives in mpc_orb_jsonb->'COM'->'covariance' as the upper triangle of a 10x10
@@ -2530,7 +2533,10 @@ _SBN_COM_NAMES = ["q", "e", "i", "node", "argperi", "peri_time"]
 _GAUSS_K_DEG = 0.9856076686          # mean motion in deg/day at a = 1 AU
 _MJD_TO_JD = 2400000.5
 _PESSIMISTIC_H_OFFSET = 0.3          # magnitudes fainter for the pessimistic arm
-_PESSIMISTIC_LOV_NODES = 5           # a short-arc covariance is ~99.9% rank one
+_PESSIMISTIC_N_SIGMA = 3.0           # excursion along each principal axis, in sigmas
+_PESSIMISTIC_N_ORBITS = 13           # the nominal orbit plus +/- n_sigma along each of six axes
+_PESSIMISTIC_N_CLONES = 100          # clones for the alternative full-covariance sampling
+_PESSIMISTIC_SEED = 20260912         # fixes those clones: the pass is reproducible run to run
 _PESSIMISTIC_T_REF = 2461200.5       # fixed reference epoch so the bound is reproducible
 _PESSIMISTIC_CHUNK_ROWS = 200_000    # node-rows per apparition solve
 DETECTABLE_COLS = ("n_detectable", "n_detectable_var",
@@ -2604,10 +2610,10 @@ def sbn_fetch_covariances(designations, conn=None):
 def _com_to_keplerian(samples, epoch_mjd, h):
     """Cometary element samples (n, 6) -> the frame the apparition solver takes."""
     q, e, inc, node, argperi, tperi = samples.T
-    # Far out along the line of variation a node can leave the physical region -- q below
-    # zero, or e at or above one -- for an orbit whose sigma_q is a sizeable fraction of q.
-    # Clamp to something still an orbit; those nodes carry little weight and non-finite
-    # apparitions are dropped downstream.
+    # Far out along an axis a sample can leave the physical region -- q below zero, or e at
+    # or above one -- for an orbit whose sigma_q is a sizeable fraction of q. Clamp to
+    # something still an orbit so the apparition solver never sees a degenerate orbit; the
+    # caller masks these rows out of the bound (see _axis_orbits).
     e = np.clip(e, 0.0, 0.99)
     q = np.maximum(q, 0.01)
     a = q / np.maximum(1.0 - e, 1e-6)
@@ -2618,24 +2624,61 @@ def _com_to_keplerian(samples, epoch_mjd, h):
                              H=np.full(len(a), h)))
 
 
-def _lov_nodes(entry, n_nodes=_PESSIMISTIC_LOV_NODES):
-    """Orbits at Gauss-Hermite nodes along the line of variation of one covariance record.
+def _axis_orbits(entry, n_sigma=_PESSIMISTIC_N_SIGMA):
+    """The nominal orbit plus +/- n_sigma along each principal axis of one covariance record.
 
-    A short-arc covariance is dominated by one direction (for one-opposition orbits the leading
-    eigenvector carries a median 99.9% of the variance), so a few quadrature nodes along it
-    reproduce a full 6-D Monte Carlo at a fraction of the cost. Returns (frame, weights) with
-    the weights summing to one; the middle node is the nominal orbit.
+    Returns (frame, valid) with _PESSIMISTIC_N_ORBITS = 1 + 2*6 rows, the nominal orbit first.
+    Scaling each unit eigenvector by n_sigma * sqrt(its eigenvalue) puts every excursion at the
+    same Mahalanobis distance n_sigma from the nominal orbit, so the set samples one
+    fixed-probability surface of the uncertainty ellipsoid and needs no claim about which
+    direction dominates. `valid` marks the rows that are still a bound, physical orbit; the rest
+    are clamped into the physical region by _com_to_keplerian so the apparition solver never sees
+    a degenerate orbit, and are masked out of the bound by the caller.
     """
     C = 0.5 * (entry["cov"] + entry["cov"].T)
     w_eig, V = np.linalg.eigh(C)
-    k = int(np.argmax(w_eig))
-    lov = V[:, k] * np.sqrt(max(w_eig[k], 0.0))          # the 1-sigma step along the LOV
-    x, wq = np.polynomial.hermite_e.hermegauss(n_nodes)  # nodes in units of sigma
-    wq = wq / wq.sum()
-    draws = entry["values"][None, :] + x[:, None] * lov[None, :]
+    steps = V * np.sqrt(np.clip(w_eig, 0.0, None))       # column j: the 1-sigma step along axis j
+    offsets = np.vstack([np.zeros((1, 6)), n_sigma * steps.T, -n_sigma * steps.T])
+    draws = entry["values"][None, :] + offsets
+    valid = (draws[:, 0] > 0.0) & (draws[:, 1] >= 0.0) & (draws[:, 1] < 1.0)
     frame = _com_to_keplerian(draws, entry["epoch_mjd"], np.nan)
-    frame["H"] = np.full(n_nodes, entry["h"])
-    return frame, wq
+    frame["H"] = np.full(len(draws), entry["h"])
+    return frame, valid
+
+
+def _clone_deviates(n_clones=_PESSIMISTIC_N_CLONES, seed=_PESSIMISTIC_SEED):
+    """n_clones standard normal deviates (n_clones, 6), fixed by `seed`.
+
+    Drawn in antithetic pairs (z, -z) so the set is exactly symmetric about the nominal orbit
+    and its sample mean is the nominal orbit exactly rather than to within Monte Carlo error.
+    One set is drawn per run and reused for every object, so differences between objects reflect
+    their covariances rather than sampling noise (common random numbers).
+    """
+    rng = np.random.default_rng(seed)
+    z = rng.standard_normal((n_clones // 2, 6))
+    z = np.vstack([z, -z])
+    if len(z) < n_clones:                                # odd n_clones: one unpaired draw
+        z = np.vstack([z, rng.standard_normal((1, 6))])
+    return z
+
+
+def _clone_orbits(entry, z):
+    """The nominal orbit plus one clone per row of `z`, drawn from the full covariance.
+
+    Returns (frame, valid) with 1 + len(z) rows, the nominal orbit first. The clones are
+    entry["values"] + z @ L.T with L L^T = the covariance, so they are a sample from the
+    published multivariate Gaussian rather than a structured excursion; L comes from the
+    eigendecomposition rather than a Cholesky factor because short-arc covariances are
+    near-singular and often numerically indefinite. `valid` is as in _axis_orbits.
+    """
+    C = 0.5 * (entry["cov"] + entry["cov"].T)
+    w_eig, V = np.linalg.eigh(C)
+    L = V * np.sqrt(np.clip(w_eig, 0.0, None))           # C = L L^T
+    draws = np.vstack([entry["values"][None, :], entry["values"][None, :] + z @ L.T])
+    valid = (draws[:, 0] > 0.0) & (draws[:, 1] >= 0.0) & (draws[:, 1] < 1.0)
+    frame = _com_to_keplerian(draws, entry["epoch_mjd"], np.nan)
+    frame["H"] = np.full(len(draws), entry["h"])
+    return frame, valid
 
 
 def _detectable_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
@@ -2646,29 +2689,43 @@ def _detectable_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
             for dh in (0.0, h_offset)]
 
 
-def pessimistic_detectable_bounds(entries, n_nodes=_PESSIMISTIC_LOV_NODES,
-                                  h_offset=_PESSIMISTIC_H_OFFSET, verbose=False):
+def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
+                                  h_offset=_PESSIMISTIC_H_OFFSET, n_clones=None,
+                                  seed=_PESSIMISTIC_SEED, verbose=False):
     """Lower bound on n_detectable over the orbit covariance and a fainter H, per object.
 
     `entries` is the {designation: record} mapping from sbn_fetch_covariances. Each object is
-    scored at n_nodes Gauss-Hermite nodes along its line of variation, at the catalogued H and
-    at H + h_offset (2 * n_nodes evaluations, n_nodes propagations, since H enters the apparent
-    magnitude as an additive constant). Returns a DataFrame with one row per object:
-    Principal_desig, n_detectable_nominal (nominal orbit, catalogued H), n_detectable_lower and
+    scored at a set of orbits compatible with its covariance, at the catalogued H and at
+    H + h_offset (two evaluations per orbit but only one propagation, since H enters the
+    apparent magnitude as an additive constant). Two ways to build that set:
+
+      n_clones=None (default)  the _PESSIMISTIC_N_ORBITS orbits of _axis_orbits: the nominal
+                               solution plus +/- n_sigma along each of the six principal axes.
+      n_clones=N               the nominal solution plus N clones drawn from the full covariance
+                               (_clone_orbits), fixed by `seed` so the pass is reproducible.
+
+    Note that a minimum over N random clones is not a fixed quantity the way the axis set is:
+    it drifts downward as N grows, so bounds taken at different n_clones are not comparable.
+
+    Returns a DataFrame with one row per object: Principal_desig,
+    n_detectable_nominal (nominal orbit, catalogued H), n_detectable_lower and
     n_detectable_upper (min and max over the scenarios), n_detectable_lower_H (the pessimistic-H
     arm alone), and the four DETECTABLE_COLS of the minimising scenario as <col>_lower, so the
     substituted row is a self-consistent orbit rather than a mix. Objects without a finite H
     are skipped; an empty DataFrame is returned when nothing can be scored.
     """
-    desigs, frames = [], []
+    z = None if n_clones is None else _clone_deviates(n_clones, seed)
+    desigs, frames, valids = [], [], []
     for desig, e in entries.items():
         if not np.isfinite(e["h"]):
             continue
-        f, _w = _lov_nodes(e, n_nodes)
+        f, v = _axis_orbits(e, n_sigma) if z is None else _clone_orbits(e, z)
         frames.append(f)
+        valids.append(v)
         desigs.append(desig)
     if not frames:
         return pd.DataFrame()
+    n_orbits = len(valids[0])           # uniform by construction; the reshape below assumes it
     big = pd.concat(frames, ignore_index=True)
     t0 = time.time()
     F = np.empty((len(big), 2, len(DETECTABLE_COLS)))
@@ -2679,18 +2736,20 @@ def pessimistic_detectable_bounds(entries, n_nodes=_PESSIMISTIC_LOV_NODES,
         if verbose:
             print("  solved %d/%d node-rows (%.0fs)" % (hi, len(big), time.time() - t0),
                   flush=True)
-    # (object, scenario, column) with the scenarios ordered [nodes at H, nodes at H + offset]
-    F = F.reshape(len(desigs), n_nodes, 2, len(DETECTABLE_COLS)).transpose(0, 2, 1, 3)
-    F = F.reshape(len(desigs), 2 * n_nodes, len(DETECTABLE_COLS))
+    # (object, scenario, column) with the scenarios ordered [orbits at H, orbits at H + offset]
+    F = F.reshape(len(desigs), n_orbits, 2, len(DETECTABLE_COLS)).transpose(0, 2, 1, 3)
+    F = F.reshape(len(desigs), 2 * n_orbits, len(DETECTABLE_COLS))
+    # Axis excursions that left the physical region were clamped only to keep the solver happy;
+    # drop them here so they cannot set the bound. The nominal orbit is always retained.
+    F[~np.tile(np.asarray(valids), (1, 2))] = np.nan
     n_detectable = F[:, :, 0]
     k_min = np.argmin(np.where(np.isfinite(n_detectable), n_detectable, np.inf), axis=1)
-    mid = n_nodes // 2                      # the central Gauss-Hermite node, at the catalogued H
     out = dict(Principal_desig=desigs,
-               n_detectable_nominal=n_detectable[:, mid],
+               n_detectable_nominal=n_detectable[:, 0],      # the nominal orbit, catalogued H
                n_detectable_lower=np.nanmin(n_detectable, axis=1),
                n_detectable_upper=np.nanmax(n_detectable, axis=1),
-               n_detectable_lower_H=np.nanmin(n_detectable[:, n_nodes:], axis=1),
-               n_evals=2 * n_nodes, n_solves=n_nodes)
+               n_detectable_lower_H=np.nanmin(n_detectable[:, n_orbits:], axis=1),
+               n_evals=2 * n_orbits, n_solves=n_orbits)
     rows = np.arange(len(desigs))
     for j, c in enumerate(DETECTABLE_COLS):
         out[c + "_lower"] = F[rows, k_min, j]
