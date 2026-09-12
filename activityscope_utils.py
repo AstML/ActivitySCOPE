@@ -2541,6 +2541,11 @@ _PESSIMISTIC_T_REF = 2461200.5       # fixed reference epoch so the bound is rep
 _PESSIMISTIC_CHUNK_ROWS = 200_000    # node-rows per apparition solve
 DETECTABLE_COLS = ("n_detectable", "n_detectable_var",
                    "years_since_first_detectable", "days_since_last_detectable")
+PESSIMISTIC_SCENARIO_COLS = (
+    "H", "a", "e", "i", "Node", "Peri",
+    "vis_q", "Perihelion_direction_x_e", "Perihelion_direction_y_e",
+    "days_since_last_opp",
+) + DETECTABLE_COLS
 
 
 def sbn_connect():
@@ -2681,17 +2686,46 @@ def _clone_orbits(entry, z):
     return frame, valid
 
 
-def _detectable_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
-    """The four detectable-apparition features at the frame's H and at H + h_offset, sharing one propagation."""
+def _pessimistic_scenario_features(frame, G, t_ref, h_offset=0.0):
+    """Production model inputs for one clone/H scenario, reusing solved apparitions."""
+    scenario = frame.copy()
+    scenario["H"] += h_offset
+    eps_val = 1e-3
+    r_vis_q = scenario["a"] * (1.0 - scenario["e"])
+    delta_vis_q = np.maximum(r_vis_q - 1.0, eps_val)
+    scenario["vis_q"] = (
+        5.0 * np.log10(np.maximum(r_vis_q, eps_val) * delta_vis_q) + scenario["H"]
+    ).astype(float)
+
+    node_rad = np.radians(scenario["Node"])
+    peri_rad = np.radians(scenario["Peri"])
+    inc_rad = np.radians(scenario["i"])
+    scenario["Perihelion_direction_x_e"] = scenario["e"] * (
+        np.cos(node_rad) * np.cos(peri_rad)
+        - np.sin(node_rad) * np.sin(peri_rad) * np.cos(inc_rad)
+    )
+    scenario["Perihelion_direction_y_e"] = scenario["e"] * (
+        np.sin(node_rad) * np.cos(peri_rad)
+        + np.cos(node_rad) * np.sin(peri_rad) * np.cos(inc_rad)
+    )
+    scenario["days_since_last_opp"] = _days_since_last_opp(G, t_ref)
+    for column, values in zip(DETECTABLE_COLS, _detectable_from_apparitions(G, t_ref, h_offset)):
+        scenario[column] = values
+    return scenario.loc[:, PESSIMISTIC_SCENARIO_COLS].to_numpy(dtype=float)
+
+
+def _pessimistic_scenarios_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
+    """Production model inputs at the frame's H and at H + h_offset, sharing one propagation."""
     set_reference_epoch(t_ref)
     G = _solve_apparitions(frame, n_opp=_DET_N_APPARITIONS, t_ref=t_ref)
-    return [np.column_stack(_detectable_from_apparitions(G, t_ref, h_offset=dh))
+    return [_pessimistic_scenario_features(frame, G, t_ref, h_offset=dh)
             for dh in (0.0, h_offset)]
 
 
 def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
                                   h_offset=_PESSIMISTIC_H_OFFSET, n_clones=None,
-                                  seed=_PESSIMISTIC_SEED, verbose=False):
+                                  seed=_PESSIMISTIC_SEED, verbose=False,
+                                  return_scenarios=False):
     """Lower bound on n_detectable over the orbit covariance and a fainter H, per object.
 
     `entries` is the {designation: record} mapping from sbn_fetch_covariances. Each object is
@@ -2710,9 +2744,12 @@ def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
     Returns a DataFrame with one row per object: Principal_desig,
     n_detectable_nominal (nominal orbit, catalogued H), n_detectable_lower and
     n_detectable_upper (min and max over the scenarios), n_detectable_lower_H (the pessimistic-H
-    arm alone), and the four DETECTABLE_COLS of the minimising scenario as <col>_lower, so the
-    substituted row is a self-consistent orbit rather than a mix. Objects without a finite H
-    are skipped; an empty DataFrame is returned when nothing can be scored.
+    arm alone), and every PESSIMISTIC_SCENARIO_COLS feature of the minimising scenario as
+    <col>_lower. This includes all eight engineered model features and the clone's raw orbital
+    values, so a re-scored row is self-consistent rather than a mix. When `return_scenarios` is
+    true, also returns a long DataFrame containing every valid scenario with these columns
+    suffixed `_scenario`, suitable for evaluating extrema of model predictions. Objects without a
+    finite H are skipped; an empty DataFrame is returned when nothing can be scored.
     """
     z = None if n_clones is None else _clone_deviates(n_clones, seed)
     desigs, frames, valids = [], [], []
@@ -2728,21 +2765,21 @@ def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
     n_orbits = len(valids[0])           # uniform by construction; the reshape below assumes it
     big = pd.concat(frames, ignore_index=True)
     t0 = time.time()
-    F = np.empty((len(big), 2, len(DETECTABLE_COLS)))
+    F = np.empty((len(big), 2, len(PESSIMISTIC_SCENARIO_COLS)))
     for lo in range(0, len(big), _PESSIMISTIC_CHUNK_ROWS):
         hi = min(lo + _PESSIMISTIC_CHUNK_ROWS, len(big))
-        a, b = _detectable_both(big.iloc[lo:hi], h_offset)
+        a, b = _pessimistic_scenarios_both(big.iloc[lo:hi], h_offset)
         F[lo:hi, 0], F[lo:hi, 1] = a, b
         if verbose:
             print("  solved %d/%d node-rows (%.0fs)" % (hi, len(big), time.time() - t0),
                   flush=True)
     # (object, scenario, column) with the scenarios ordered [orbits at H, orbits at H + offset]
-    F = F.reshape(len(desigs), n_orbits, 2, len(DETECTABLE_COLS)).transpose(0, 2, 1, 3)
-    F = F.reshape(len(desigs), 2 * n_orbits, len(DETECTABLE_COLS))
+    F = F.reshape(len(desigs), n_orbits, 2, len(PESSIMISTIC_SCENARIO_COLS)).transpose(0, 2, 1, 3)
+    F = F.reshape(len(desigs), 2 * n_orbits, len(PESSIMISTIC_SCENARIO_COLS))
     # Axis excursions that left the physical region were clamped only to keep the solver happy;
     # drop them here so they cannot set the bound. The nominal orbit is always retained.
     F[~np.tile(np.asarray(valids), (1, 2))] = np.nan
-    n_detectable = F[:, :, 0]
+    n_detectable = F[:, :, PESSIMISTIC_SCENARIO_COLS.index("n_detectable")]
     k_min = np.argmin(np.where(np.isfinite(n_detectable), n_detectable, np.inf), axis=1)
     out = dict(Principal_desig=desigs,
                n_detectable_nominal=n_detectable[:, 0],      # the nominal orbit, catalogued H
@@ -2751,9 +2788,21 @@ def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
                n_detectable_lower_H=np.nanmin(n_detectable[:, n_orbits:], axis=1),
                n_evals=2 * n_orbits, n_solves=n_orbits)
     rows = np.arange(len(desigs))
-    for j, c in enumerate(DETECTABLE_COLS):
+    for j, c in enumerate(PESSIMISTIC_SCENARIO_COLS):
         out[c + "_lower"] = F[rows, k_min, j]
-    return pd.DataFrame(out)
+    bounds = pd.DataFrame(out)
+    if not return_scenarios:
+        return bounds
+
+    scenario_count = 2 * n_orbits
+    scenario_values = F.reshape(-1, len(PESSIMISTIC_SCENARIO_COLS))
+    scenarios = pd.DataFrame(
+        scenario_values,
+        columns=[c + "_scenario" for c in PESSIMISTIC_SCENARIO_COLS],
+    )
+    scenarios.insert(0, "scenario", np.tile(np.arange(scenario_count), len(desigs)))
+    scenarios.insert(0, "Principal_desig", np.repeat(desigs, scenario_count))
+    return bounds, scenarios.loc[np.isfinite(scenarios["n_detectable_scenario"])].reset_index(drop=True)
 
 
 _GRID_STEP_DAYS = 10.0          # time-grid sampling for the detectability windows
