@@ -512,13 +512,13 @@ def feature_engineering(orb, extra_features=False):
         Also compute the exploratory / superseded feature families that the 12-feature model
         does not use -- the orbit-averaged block (vis_orbit_mag_multi,
         spatial_discoverability_fraction, dec_flux_weighted, vis_orbit_flux_*, ...), the
-        last-three-perihelia reconstruction, the 17-apparition vis_opp_* solver,
-        n_detect_windows, and the survey-era block (E_50yr, E_var, E_full_w03, first_det_year,
-        gal_lat_frac_low, ...) apart from its one surviving column, days_since_last_opp.
-        Together they are the great majority of this function's runtime (n_detect_windows
-        alone is most of it), so they are off by default; see
-        _add_orbit_averaged_features, _add_exploratory_features, add_detect_window_features
-        and add_survey_era_features. Turning this on reproduces their values unchanged.
+        last-three-perihelia reconstruction, the 17-apparition vis_opp_* solver, and the
+        survey-era block (E_50yr, E_var, E_full_w03, first_det_year, gal_lat_frac_low, ...)
+        apart from its one surviving column, days_since_last_opp. Together they are the
+        majority of this function's runtime, so they are off by default; see
+        _add_orbit_averaged_features, _add_exploratory_features and add_survey_era_features.
+        Turning this on reproduces their values unchanged. n_detect_windows (the ramp-threshold
+        version, add_detect_window_features) is computed on both paths.
     
     Returns
     -------
@@ -774,13 +774,17 @@ def feature_engineering(orb, extra_features=False):
         # was superseded by the detectable-apparition features below; only days_since_last_opp
         # survived into the model, and add_last_opposition_feature computes that alone.
         orb = add_survey_era_features(orb, G=G, t_ref=t_ref)
-        # n_detect_windows walks the whole 20-yr lookback on a 10-day grid rather than scoring
-        # solved apparitions, which makes it several times more expensive than everything else in
-        # this function put together. It is not in the model feature list either.
-        orb = add_detect_window_features(orb)
     else:
         orb = add_last_opposition_feature(orb, G=G, t_ref=t_ref)
     orb = add_detectable_apparition_features(orb, G=G, t_ref=t_ref)
+    # n_detect_windows walks the true geometry through the 20-yr lookback on a 10-day grid rather
+    # than scoring solved apparitions, so it is the one column that sees solar elongation and
+    # close approaches away from opposition. That is what the apparition counts miss for
+    # near-Earth objects: on q < 1.5 objects it is worth -6.8% Poisson deviance / -2.8% log-loss
+    # on top of the 12-feature set (modeling/neo_sfs/REPORT.md, 2026-09-14), against -0.3% on the
+    # main-belt-dominated full frame. It uses the same depth ramp as n_detectable, so it needs no
+    # survey calibration. Its row chunks run on the apparition thread pool.
+    orb = add_detect_window_features(orb)
 
     return orb
 
@@ -1737,8 +1741,9 @@ def _add_exploratory_features(orb):
 #   days_since_last_detectable_E50yr  days from the most recent apparition with detection probability > 0.5 to the reference date
 #   year_brightest_app   calendar year of the brightest apparition in the window
 #   years_since_brightest_app  the same as an elapsed duration; this is the column the model uses
-#   n_detect_windows     number of separate detectable intervals in the window, from a 10-day time grid
-#                        (add_detect_window_features below; modeling/feature_eng2 final round: -0.28% deviance)
+#   n_detect_windows     number of separate detectable intervals in the 20-yr window, from a 10-day time grid
+#                        (add_detect_window_features below; modeling/feature_eng2 final round: -0.28% deviance;
+#                        since 2026-09-14 thresholded on the _survey_limit ramp rather than the era table)
 #
 # The last two were added in the second feature-engineering round (modeling/feature_eng2/REPORT.md):
 # with orbital_period_sync they cut Poisson deviance by 1.5% on 1.17M held-out rows.
@@ -2235,11 +2240,12 @@ def _magnitude_detection(year, V, window=50):
 def _threshold_magnitude(year, window=20):
     """A single limiting magnitude for the year, for the one feature that needs a hard cut.
 
-    n_detect_windows counts runs of "detectable" samples on a time grid, which
-    is a threshold question, not a probability one. With the measured
-    calibration the threshold is V_50(t) -- the magnitude at which the survey
-    system of that year detected half of what it could -- rather than the
-    hand-set era value.
+    With the measured calibration the threshold is V_50(t) -- the magnitude at
+    which the survey system of that year detected half of what it could --
+    rather than the hand-set era value. n_detect_windows used this until
+    2026-09-14; it now thresholds on the _survey_limit ramp (modeling/neo_sfs:
+    the ramp keeps the NEO gain, -6.8% vs -7.1% deviance on q < 1.5). Kept for
+    the survey-efficiency study.
     """
     tab = _efficiency_table()
     if tab is None:
@@ -2807,20 +2813,21 @@ def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
 
 _GRID_STEP_DAYS = 10.0          # time-grid sampling for the detectability windows
 _GRID_MIN_ELONG_DEG = 60.0      # an object closer than this to the Sun is not observable, however bright
-_GRID_CHUNK = 20000
+_GRID_CHUNK = 4000              # rows per chunk; ~230 MB of temporaries each, several chunks in flight
 
 
 def add_detect_window_features(orb):
     """Adds n_detect_windows: the number of separate intervals within the 20-yr lookback during which the
-    object was brighter than the era limiting magnitude AND more than _GRID_MIN_ELONG_DEG from the Sun,
-    on a _GRID_STEP_DAYS time grid.
+    object was brighter than the survey limit of the day (_survey_limit, the 0.12 mag/yr ramp that
+    n_detectable uses) AND more than _GRID_MIN_ELONG_DEG from the Sun, on a _GRID_STEP_DAYS time grid.
 
     Unlike the apparition features, which score each solved apparition at a single instant, this walks
     the true geometry through the whole window, so it counts what was actually observable: an interior
     object's equal-longitude events next to the Sun do not count, and an apparition that stayed above the
     limit for only a few days counts the same as one that lasted months (duration itself did not add
     anything on held-out data; the count did). Same elements, Earth ephemeris and magnitude model as
-    _solve_apparitions. Processed in row chunks to bound memory (~1 GB per 20k rows)."""
+    _solve_apparitions. Processed in row chunks to bound memory, on the apparition thread pool
+    (_run_row_chunks); every row is independent, so the result is identical to a sequential loop."""
     needed = ("a", "e", "i", "Node", "Peri", "M", "Epoch", "H")
     if not all(c in orb.columns for c in needed):
         orb["n_detect_windows"] = np.nan
@@ -2845,8 +2852,8 @@ def add_detect_window_features(orb):
         r = 1.00014061 - 0.01670861 * np.cos(M) - 0.00013957 * np.cos(2.0 * M)
         return r * np.cos(lam), r * np.sin(lam)
 
-    for s0 in range(0, len(orb), _GRID_CHUNK):
-        sl = slice(s0, min(len(orb), s0 + _GRID_CHUNK))
+    def chunk(s0, e0):
+        sl = slice(s0, e0)
         B = lambda v: v[sl][:, None]
         t = t_ref - offsets
         MM = np.mod(B(M0) + B(n_mm) * (t - B(epoch)) + np.pi, 2.0 * np.pi) - np.pi
@@ -2868,9 +2875,11 @@ def add_detect_window_features(orb):
             re_ = np.sqrt(xe * xe + ye * ye)
             cos_elong = np.clip(-(xe * dx + ye * dy) / np.maximum(re_ * delta, 1e-12), -1.0, 1.0)
             year = 2000.0 + (t - 2451545.0) / 365.25
-            det = (V < _threshold_magnitude(year)) & (cos_elong < np.cos(np.radians(_GRID_MIN_ELONG_DEG)))
+            det = (V < _survey_limit(year)) & (cos_elong < np.cos(np.radians(_GRID_MIN_ELONG_DEG)))
         d = det.astype(np.int8)
         out[sl] = d[:, 0] + ((d[:, 1:] == 1) & (d[:, :-1] == 0)).sum(axis=1)   # number of runs of consecutive detectable samples
+
+    _run_row_chunks(chunk, len(orb), _GRID_CHUNK)
     orb["n_detect_windows"] = out.astype(float)
     return orb
 
