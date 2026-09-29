@@ -1826,8 +1826,8 @@ def set_reference_epoch(jd):
     _reference_epoch_override = None if jd is None else float(jd)
 
 
-def _reference_epoch(orb):
-    """The Julian date the apparition features treat as "now" for every row in `orb`."""
+def configured_reference_epoch():
+    """The pinned reference date (set_reference_epoch or the environment), or None if unpinned."""
     if _reference_epoch_override is not None:
         return _reference_epoch_override
     env = os.environ.get("ACTIVITYSCOPE_REFERENCE_EPOCH_JD")
@@ -1836,6 +1836,16 @@ def _reference_epoch(orb):
             return float(env)
         except ValueError:
             pass
+    return None
+
+
+def catalogue_reference_epoch(orb):
+    """The MPCORB standard epoch of `orb`: its latest Epoch, ignoring any pinned override.
+
+    This is what to hand to set_reference_epoch (or to the pessimistic pass) after loading the
+    orbit database, so that every frame derived from it -- comet file, Delta-H sweep frames,
+    covariance clones -- shares the catalogue's own "now" instead of picking its own.
+    """
     ep = orb["Epoch"].to_numpy(dtype=np.float64)
     ep = ep[np.isfinite(ep)]
     if not ep.size:
@@ -1852,6 +1862,12 @@ def _reference_epoch(orb):
             f"standard-epoch orbit. Call set_reference_epoch(jd) with the catalog retrieval date.",
             RuntimeWarning, stacklevel=2)
     return t_ref
+
+
+def _reference_epoch(orb):
+    """The Julian date the apparition features treat as "now" for every row in `orb`."""
+    pinned = configured_reference_epoch()
+    return pinned if pinned is not None else catalogue_reference_epoch(orb)
 
 
 def _load_confusion_map():
@@ -2543,7 +2559,6 @@ _PESSIMISTIC_N_SIGMA = 3.0           # excursion along each principal axis, in s
 _PESSIMISTIC_N_ORBITS = 13           # the nominal orbit plus +/- n_sigma along each of six axes
 _PESSIMISTIC_N_CLONES = 100          # clones for the alternative full-covariance sampling
 _PESSIMISTIC_SEED = 20260912         # fixes those clones: the pass is reproducible run to run
-_PESSIMISTIC_T_REF = 2461200.5       # fixed reference epoch so the bound is reproducible
 _PESSIMISTIC_CHUNK_ROWS = 200_000    # node-rows per apparition solve
 DETECTABLE_COLS = ("n_detectable", "n_detectable_var",
                    "years_since_first_detectable", "days_since_last_detectable")
@@ -2720,9 +2735,12 @@ def _pessimistic_scenario_features(frame, G, t_ref, h_offset=0.0):
     return scenario.loc[:, PESSIMISTIC_SCENARIO_COLS].to_numpy(dtype=float)
 
 
-def _pessimistic_scenarios_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
-    """Production model inputs at the frame's H and at H + h_offset, sharing one propagation."""
-    set_reference_epoch(t_ref)
+def _pessimistic_scenarios_both(frame, h_offset, t_ref):
+    """Production model inputs at the frame's H and at H + h_offset, sharing one propagation.
+
+    `t_ref` is passed in rather than derived from `frame`: a clone frame carries the object's own
+    SBN fit epoch, not the MPCORB standard epoch, so its own maximum is the wrong "now".
+    """
     G = _solve_apparitions(frame, n_opp=_DET_N_APPARITIONS, t_ref=t_ref)
     return [_pessimistic_scenario_features(frame, G, t_ref, h_offset=dh)
             for dh in (0.0, h_offset)]
@@ -2731,7 +2749,7 @@ def _pessimistic_scenarios_both(frame, h_offset, t_ref=_PESSIMISTIC_T_REF):
 def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
                                   h_offset=_PESSIMISTIC_H_OFFSET, n_clones=None,
                                   seed=_PESSIMISTIC_SEED, verbose=False,
-                                  return_scenarios=False):
+                                  return_scenarios=False, t_ref=None):
     """Lower bound on n_detectable over the orbit covariance and a fainter H, per object.
 
     `entries` is the {designation: record} mapping from sbn_fetch_covariances. Each object is
@@ -2756,7 +2774,21 @@ def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
     true, also returns a long DataFrame containing every valid scenario with these columns
     suffixed `_scenario`, suitable for evaluating extrema of model predictions. Objects without a
     finite H are skipped; an empty DataFrame is returned when nothing can be scored.
+
+    `t_ref` is the reference date the apparition features treat as "now", and must be the same one
+    the production features were built with, or the re-scored rows are not comparable to them. It
+    cannot be auto-detected here, since a clone frame carries the object's own SBN fit epoch rather
+    than the MPCORB standard epoch, so either pass catalogue_reference_epoch(orb) or pin it once
+    with set_reference_epoch(catalogue_reference_epoch(orb)).
     """
+    if t_ref is None:
+        t_ref = configured_reference_epoch()
+    if t_ref is None or not np.isfinite(t_ref):
+        raise RuntimeError(
+            "pessimistic_detectable_bounds needs an explicit reference epoch: pass "
+            "t_ref=utils.catalogue_reference_epoch(orb), or call "
+            "utils.set_reference_epoch(utils.catalogue_reference_epoch(orb)) first")
+    t_ref = float(t_ref)
     z = None if n_clones is None else _clone_deviates(n_clones, seed)
     desigs, frames, valids = [], [], []
     for desig, e in entries.items():
@@ -2774,7 +2806,7 @@ def pessimistic_detectable_bounds(entries, n_sigma=_PESSIMISTIC_N_SIGMA,
     F = np.empty((len(big), 2, len(PESSIMISTIC_SCENARIO_COLS)))
     for lo in range(0, len(big), _PESSIMISTIC_CHUNK_ROWS):
         hi = min(lo + _PESSIMISTIC_CHUNK_ROWS, len(big))
-        a, b = _pessimistic_scenarios_both(big.iloc[lo:hi], h_offset)
+        a, b = _pessimistic_scenarios_both(big.iloc[lo:hi], h_offset, t_ref)
         F[lo:hi, 0], F[lo:hi, 1] = a, b
         if verbose:
             print("  solved %d/%d node-rows (%.0fs)" % (hi, len(big), time.time() - t0),
