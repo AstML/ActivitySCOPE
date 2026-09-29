@@ -170,7 +170,7 @@ def save_shap_pgf(X_test, shap_values, out_dir, features=SIMPLE_FEATURES, prefix
     }
     with matplotlib.rc_context(pgf_rc):
         fig, _ = _plot_panel(X_test, shap_values, features, FEATURE_LABELS_LATEX)
-        out = os.path.join(out_dir, f"{prefix}_panel.pgf")
+        out = os.path.join(out_dir, f"{prefix}_panel.pdf")
         fig.savefig(out, backend="pgf")
         plt.close(fig)
     return [out]
@@ -186,5 +186,5 @@ def run(orb_training, orb_test, features=SIMPLE_FEATURES, out_dir=None,
     plot_shap_display(X_test, shap_values, features=features)
     if out_dir is not None:
         saved = save_shap_pgf(X_test, shap_values, out_dir, features=features)
-        print(f"Saved {len(saved)} PGF files to {out_dir}")
+        print(f"Saved {len(saved)} PDF files to {out_dir}")
     return predictor, X_test, shap_values
