@@ -38,7 +38,7 @@ Paper symbols and the column names used in `activityscope_utils.py`, `h_neutrali
 | Paper | Code | Notes |
 |---|---|---|
 | $a$, $e$, $i$, $\Omega$, $\omega$, $M$ | `a`, `e`, `i`, `Node`, `Peri`, `M` | Keplerian elements (au, degrees) |
-| $q$, $Q$ | `q`, `Q` | Named `Perihelion_dist` / `Aphelion_dist` until `getFinal` renames them |
+| $q$, $Q$ | `Perihelion_dist`, `Aphelion_dist` | Also `q` / `Q` in the output tables |
 | $T_J$ | `TJ` | Tisserand parameter with respect to Jupiter |
 | $H_V$ | `H` | Median of MPC/AstDyS/JPL when all three exist, otherwise the dimmest. Per-catalog values: `H_MPC`, `H_astdys`, `H_jpl` |
 | $N_{\rm opp}$ | `Num_opps` | Observed oppositions |
