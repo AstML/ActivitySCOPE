@@ -59,3 +59,5 @@ Object,Corrected H,Reason
 2022 GF6, 18.1, find_orb recalc prioritizing F51 photometry
 2008 BJ22, 15.2, find_orb recalc
 2008 VK110, 13.75, the magnitude from it's main bright opposition when most active
+2023 PY5, 17.7, using F52 photometry instead of amateur astrometry
+2002 FU44, 15.2, recalibrated and found those telescopes on those nights systematically measuring too bright using PyRoOrb
